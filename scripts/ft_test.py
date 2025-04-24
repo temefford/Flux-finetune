@@ -663,10 +663,8 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune a FLUX model")
-    parser.add_argument("--config", type=str, help="Path to the configuration file")
-    args = parser.parse_args()
-    args = parse_args(args.config)
+    # Call the main argument parsing function which handles CLI args and config file
+    args = parse_args()
     args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
     args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
     args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
