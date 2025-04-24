@@ -502,10 +502,10 @@ def main(args):
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer( # Use transformer variable
-                    hidden_states=latents, # Pass clean latents
-                    timestep=timesteps,
-                    encoder_hidden_states=prompt_embeds, # CLIP embeds
-                    text_embeds=pooled_projections, # Pass pooled embeds (check name FLUX expects)
+                    hidden_states=latents.to(accelerator.device), # Explicitly move latents
+                    timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
+                    encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
+                    pooled_projections=pooled_projections.to(accelerator.device), # T5 pooled embeds (Correct name)
                     text_ids=batch["input_ids_2"] # Pass T5 ids
                     # --> Verify required args for FluxTransformer2DModel <--
                 ).sample
@@ -604,13 +604,12 @@ def main(args):
                     timesteps = timesteps.long()
 
                     # Predict noise using the model
-                    model_pred = transformer( # Use transformer variable
-                        hidden_states=latents, # Pass clean latents
-                        timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds, # CLIP embeds
-                        text_embeds=pooled_projections, # Pass pooled embeds (check name FLUX expects)
+                    model_pred = transformer(
+                        hidden_states=latents.to(accelerator.device),
+                        timestep=timesteps.to(accelerator.device),
+                        encoder_hidden_states=prompt_embeds.to(accelerator.device),
+                        pooled_projections=pooled_projections.to(accelerator.device), # Correct name
                         text_ids=val_batch["input_ids_2"] # Pass T5 ids
-                        # --> Verify required args for FluxTransformer2DModel <--
                     ).sample
 
                     # Assume target is noise for validation loss calculation
