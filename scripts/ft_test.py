@@ -506,8 +506,7 @@ def main(args):
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
                     pooled_projections=pooled_projections.to(accelerator.device), # T5 pooled embeds (Correct name)
-                    text_ids=batch["input_ids_2"] # Pass T5 ids
-                    # --> Verify required args for FluxTransformer2DModel <--
+                    input_ids_t5=batch["input_ids_2"].to(accelerator.device) # T5 ids (Correct name & device)
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -609,7 +608,7 @@ def main(args):
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
                         pooled_projections=pooled_projections.to(accelerator.device), # Correct name
-                        text_ids=val_batch["input_ids_2"] # Pass T5 ids
+                        input_ids_t5=val_batch["input_ids_2"].to(accelerator.device) # T5 ids (Correct name & device)
                     ).sample
 
                     # Assume target is noise for validation loss calculation
