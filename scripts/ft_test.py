@@ -88,7 +88,7 @@ def parse_args():
 
     return args
 
-# --- Data Preprocessing ---
+# --- Data Preprocessing Helper Functions ---
 def tokenize_captions(tokenizer, examples, text_column="text"):
     """Tokenizes captions from the specified text column using both CLIP and T5 tokenizers.
 
@@ -134,11 +134,11 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
         "attention_mask_2": attention_mask_2,
     }
 
-def preprocess_train(examples, dataset_abs_path, image_transforms):
+def preprocess_train(examples, dataset_abs_path, image_transforms, image_column):
     """Preprocesses a batch of training examples."""
     try:
         # Construct absolute path for images
-        images = [Image.open(os.path.join(dataset_abs_path, fn)).convert("RGB") for fn in examples["file_name"]]
+        images = [Image.open(os.path.join(dataset_abs_path, fn)).convert("RGB") for fn in examples[image_column]]
         examples["pixel_values"] = [image_transforms(image) for image in images]
     except FileNotFoundError as e:
         logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
@@ -314,7 +314,7 @@ def main(args):
         # Tokenize captions using the 'artwork' field
         captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column) # Use caption_column from args
         # Preprocess images using the absolute path
-        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms)
+        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms, args.image_column)
 
         # Combine results
         output = {
