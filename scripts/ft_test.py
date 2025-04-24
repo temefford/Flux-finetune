@@ -555,15 +555,14 @@ def main(args):
                 # Log shapes before transformer call
                 logger.debug(f"Shape BEFORE transformer call - latents: {latents.shape}")
                 logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
-                logger.info(f"Shape BEFORE transformer call - prompt_embeds (CLIP): {prompt_embeds.shape}")
-                logger.info(f"Shape BEFORE transformer call - clip_pooled (CLIP): {clip_pooled.shape}")
                 logger.info(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
+                logger.info(f"Shape BEFORE transformer call - clip_pooled (CLIP): {clip_pooled.shape}")
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
                     hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
-                    encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP sequence embeddings
+                    encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
                     pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                 ).sample
 
@@ -679,16 +678,16 @@ def main(args):
                     timesteps = timesteps.long()
 
                     # Predict noise using the model
-                    model_pred = transformer(
+                    model_pred_val = transformer(
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
-                        encoder_hidden_states=prompt_embeds.to(accelerator.device),
-                        pooled_projections=clip_pooled.to(accelerator.device),
+                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
+                        pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                     ).sample
 
                     # Assume target is noise for validation loss calculation
                     target = noise
-                    loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                    loss = F.mse_loss(model_pred_val.float(), target.float(), reduction="mean")
 
                     val_loss += loss.item()
                     val_steps += 1
