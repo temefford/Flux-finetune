@@ -215,7 +215,7 @@ def main(args):
         logger.info("Loading base model pipeline...")
         pipeline = FluxPipeline.from_pretrained(
             args.model_id, # Use model_id from config
-            revision=args.revision,
+            revision=getattr(args, 'revision', None), # Safely get revision, default to None
             torch_dtype=weight_dtype, # Use weight_dtype here during initial load
         )
         logger.info("Pipeline loaded.")
