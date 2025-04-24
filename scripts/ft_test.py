@@ -233,8 +233,15 @@ def main(args):
         logger.info(f"VAE moved to device {accelerator.device} and cast to {weight_dtype}")
 
         # Log channel configurations to debug potential mismatch
+        logger.info(f"Transformer class: {transformer.__class__.__name__}")
         logger.info(f"VAE configured latent channels: {vae.config.latent_channels}")
         logger.info(f"Transformer configured input channels: {transformer.config.in_channels}")
+
+        # Log actual loaded weight shape for x_embedder
+        try:
+            logger.info(f"Transformer x_embedder weight shape: {transformer.x_embedder.weight.shape}")
+        except AttributeError:
+            logger.error("Transformer does not have an 'x_embedder' attribute or it lacks weights.")
 
         tokenizer = pipeline.tokenizer
         tokenizer_2 = pipeline.tokenizer_2
@@ -275,6 +282,7 @@ def main(args):
 
     # --- Optimizer Setup ---
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=float(args.learning_rate), # Ensure learning_rate is float
