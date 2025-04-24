@@ -470,14 +470,11 @@ def main(args):
             with accelerator.accumulate(transformer): # Use transformer here
                 # Convert images to latent space
                 with torch.no_grad(): # VAE encoding should not require gradients
-                    # Ensure pixel_values are on the correct device before encoding
-                    pixel_values_device = batch["pixel_values"].to(accelerator.device)
+                    # Ensure pixel_values are on the correct device AND dtype
+                    pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
-                    # No need to cast pixel_values to weight_dtype here, VAE handles it if cast correctly.
-                    # latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
-                # Ensure latents are on the correct device after encoding
-                latents = latents.to(accelerator.device)
+                latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
@@ -580,11 +577,9 @@ def main(args):
             for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
-                    # Ensure pixel_values are on the correct device before encoding
-                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device)
+                    # Ensure pixel_values are on the correct device AND dtype
+                    pixel_values_device = val_batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
-                    # No need to cast pixel_values to weight_dtype here, VAE handles it if cast correctly.
-                    # latents = vae.encode(val_batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                     latents = latents * vae.config.scaling_factor
                     latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
