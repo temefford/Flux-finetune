@@ -280,8 +280,31 @@ def main(args):
         logger.warning(f"PEFT method '{args.peft_method}' not implemented for this script. Training full model.")
         transformer.requires_grad_(True) # Train full transformer if not LoRA
 
+    # --- Define Projection Layer for VAE->Transformer Channel Mismatch ---
+    # Determined from runtime error: VAE output seems to be 128, Transformer expects 64
+    vae_latent_channels_actual = 128 # Based on runtime error mat1 shape
+    transformer_in_channels_actual = 64 # Based on runtime error mat2 shape and x_embedder weight
+
+    if vae_latent_channels_actual != transformer_in_channels_actual:
+        logger.warning(
+            f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, "
+            f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer 128->64."
+        )
+        vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
+        vae_to_transformer_projection.to(accelerator.device, dtype=weight_dtype)
+    else:
+         # This case seems unlikely given the error, but included for completeness
+        logger.info("VAE output and Transformer input channels appear to match at runtime.")
+        vae_to_transformer_projection = None
+
     # --- Optimizer Setup ---
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    if vae_to_transformer_projection is not None:
+        # Ensure projection layer params require grad and add them
+        for param in vae_to_transformer_projection.parameters():
+            param.requires_grad = True 
+        params_to_optimize.extend(vae_to_transformer_projection.parameters())
+        logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -484,9 +507,26 @@ def main(args):
                     # Ensure pixel_values are on the correct device AND dtype
                     pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
+                logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
+
                 latents = latents * vae.config.scaling_factor
                 latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
+                # Apply projection layer if defined
+                if vae_to_transformer_projection is not None:
+                    b, c, h, w = latents.shape
+                    # Validate the actual channel dimension before projection
+                    if c != vae_latent_channels_actual:
+                        logger.error(f"PANIC: Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
+                        # Handle error appropriately - maybe raise exception
+                        raise ValueError(f"Unexpected latent channel dimension: {c}")
+                        
+                    latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=128)
+                    projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 128->64
+                    latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
+                    latents = latents.to(accelerator.device) # Ensure projected latents are on device
+                    logger.debug(f"Projected latents shape: {latents.shape}")
+                    
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
                     prompt_embeds_outputs = text_encoder(
@@ -585,25 +625,42 @@ def main(args):
             for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
-                    # Ensure pixel_values are on the correct device AND dtype
-                    pixel_values_device = val_batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
+                    # Ensure pixel_values are on the correct device and dtype
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
+                    logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
+
                     latents = latents * vae.config.scaling_factor
                     latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
+                    # Apply projection layer if defined
+                    if vae_to_transformer_projection is not None:
+                        b, c, h, w = latents.shape
+                        if c != vae_latent_channels_actual:
+                            logger.error(f"PANIC: Validation Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
+                            raise ValueError(f"Unexpected validation latent channel dimension: {c}")
+                            
+                        latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=128)
+                        projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 128->64
+                        latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
+                        latents = latents.to(accelerator.device) # Ensure projected latents are on device
+                        logger.debug(f"Validation: Projected latents shape: {latents.shape}")
+                        
                     # Encode prompts for validation batch
-                    prompt_embeds_outputs = text_encoder(
-                        val_batch["input_ids"],
-                        output_hidden_states=True,
-                    )
-                    prompt_embeds = prompt_embeds_outputs.hidden_states[-2]
+                    with torch.no_grad():
+                        # CLIP Embeddings
+                        prompt_embeds_outputs = text_encoder(
+                            val_batch["input_ids"],
+                            output_hidden_states=True,
+                        )
+                        prompt_embeds = prompt_embeds_outputs.hidden_states[-2]
 
-                    prompt_embeds_2_outputs = text_encoder_2(
-                        val_batch["input_ids_2"],
-                        output_hidden_states=True,
-                    )
-                    prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
-                    pooled_prompt_embeds_2 = prompt_embeds_2[:, 0]
+                        prompt_embeds_2_outputs = text_encoder_2(
+                            val_batch["input_ids_2"],
+                            output_hidden_states=True,
+                        )
+                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
+                        pooled_prompt_embeds_2 = prompt_embeds_2[:, 0]
 
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents)
