@@ -7,7 +7,7 @@ learning_rate: 1e-4            # Learning rate
 batch_size: 16                 # Per-device batch size (Adjust based on VRAM)
 gradient_accumulation_steps: 2 # Accumulate gradients (16 * 2 = effective batch size 32)
 epochs: 1                      # Number of training epochs
-mixed_precision: "no"        # Use bfloat16 mixed precision for H100/H200
+mixed_precision: "fp16"        # Use bfloat16 mixed precision for H100/H200
 output_dir: "outputs"          # Relative path from script location (will be created in /workspace/fine-tuning)
 seed: 42
 device: "cuda"                 # Use NVIDIA CUDA
