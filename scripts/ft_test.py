@@ -281,23 +281,23 @@ def main(args):
         transformer.requires_grad_(True) # Train full transformer if not LoRA
 
     # --- Define Projection Layer for VAE->Transformer Channel Mismatch ---
-    # Determined from runtime error: VAE output seems to be 128, Transformer expects 64
-    vae_latent_channels_actual = 128 # Based on runtime error mat1 shape
-    transformer_in_channels_actual = 64 # Based on runtime error mat2 shape and x_embedder weight
-
+    # Based on confirmed config values and runtime checks
+    vae_latent_channels_actual = vae.config.latent_channels # Should be 16
+    transformer_in_channels_actual = transformer.config.in_channels # Should be 64
+ 
     if vae_latent_channels_actual != transformer_in_channels_actual:
         logger.warning(
             f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, "
-            f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer 128->64."
+            f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
         )
         vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
         vae_to_transformer_projection.to(accelerator.device, dtype=weight_dtype)
     else:
-         # This case seems unlikely given the error, but included for completeness
-        logger.info("VAE output and Transformer input channels appear to match at runtime.")
+        # This case seems unlikely given the error, but included for completeness
+        logger.info("VAE output and Transformer input channels match according to configs.")
         vae_to_transformer_projection = None
-
-    # --- Optimizer Setup ---
+ 
+    # --- Optimizer Setup --- 
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     if vae_to_transformer_projection is not None:
         # Ensure projection layer params require grad and add them
@@ -513,6 +513,7 @@ def main(args):
                 latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
                 # Apply projection layer if defined
+                logger.debug(f"Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
                 if vae_to_transformer_projection is not None:
                     b, c, h, w = latents.shape
                     # Validate the actual channel dimension before projection
@@ -521,8 +522,8 @@ def main(args):
                         # Handle error appropriately - maybe raise exception
                         raise ValueError(f"Unexpected latent channel dimension: {c}")
                         
-                    latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=128)
-                    projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 128->64
+                    latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
+                    projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
                     latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
                     latents = latents.to(accelerator.device) # Ensure projected latents are on device
                     logger.debug(f"Projected latents shape: {latents.shape}")
@@ -634,14 +635,15 @@ def main(args):
                     latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
                     # Apply projection layer if defined
+                    logger.debug(f"Validation: Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
                     if vae_to_transformer_projection is not None:
                         b, c, h, w = latents.shape
                         if c != vae_latent_channels_actual:
                             logger.error(f"PANIC: Validation Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
                             raise ValueError(f"Unexpected validation latent channel dimension: {c}")
                             
-                        latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=128)
-                        projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 128->64
+                        latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
+                        projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
                         latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
                         latents = latents.to(accelerator.device) # Ensure projected latents are on device
                         logger.debug(f"Validation: Projected latents shape: {latents.shape}")
