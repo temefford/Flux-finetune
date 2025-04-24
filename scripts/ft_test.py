@@ -213,26 +213,37 @@ def main(args):
     logger.info(f"Using weight dtype: {weight_dtype}")
 
     # --- Load Models and Tokenizers ---
-    # FLUX uses multiple components, specific loading might differ slightly
-    # Based on common patterns, adjust if FLUX requires specific handling
     try:
-        pipe = FluxPipeline.from_pretrained(args.model_id, torch_dtype=torch.float16 if args.mixed_precision == "fp16" else torch.float32)
-        tokenizer = (pipe.tokenizer, pipe.tokenizer_2)
-        text_encoder = (pipe.text_encoder, pipe.text_encoder_2)
-        vae = pipe.vae
-        transformer = pipe.transformer # FLUX uses 'transformer' instead of 'unet'
-        scheduler = pipe.scheduler # Use the scheduler from the pipeline
-        logger.info("Loaded FLUX model components.")
+        # Load scheduler, tokenizer and models.
+        # FLUX uses a specific pipeline structure
+        logger.info("Loading base model pipeline...")
+        pipeline = FluxPipeline.from_pretrained(
+            args.pretrained_model_name_or_path,
+            revision=args.revision,
+            torch_dtype=weight_dtype, # Use weight_dtype here during initial load
+        )
+        logger.info("Pipeline loaded.")
+
+        # Extract components
+        noise_scheduler = pipeline.scheduler
+        vae = pipeline.vae
+        text_encoder = pipeline.text_encoder
+        text_encoder_2 = pipeline.text_encoder_2
+        transformer = pipeline.transformer # This is the main model to fine-tune
+        logger.info("Model components extracted.")
+
+        # Move VAE to device and cast dtype
+        vae.to(accelerator.device, dtype=weight_dtype)
+        logger.info(f"VAE moved to device {accelerator.device} and cast to {weight_dtype}")
+
     except Exception as e:
-        logger.error(f"Failed to load FLUX model components: {e}")
-        logger.error("Ensure you have 'transformers', 'diffusers', 'torch' installed and are logged in to Hugging Face Hub if needed.")
-        logger.error("Also check the model identifier: {args.model_id}")
+        logger.error(f"Failed to load models or components: {e}")
         return
 
     # Freeze VAE and text_encoder
     vae.requires_grad_(False)
-    text_encoder[0].requires_grad_(False)
-    text_encoder[1].requires_grad_(False)
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
     transformer.requires_grad_(False) # Start with transformer frozen, LoRA will unfreeze target modules
 
     # --- Add LoRA to transformer (UNet equivalent) ---
@@ -319,7 +330,7 @@ def main(args):
     # Define the preprocessing function with necessary arguments captured
     def preprocess_func(examples):
         # Tokenize captions using the 'artwork' field
-        captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column) # Use caption_column from args
+        captions = tokenize_captions((text_encoder, text_encoder_2), examples, text_column=args.caption_column) # Use caption_column from args
         # Preprocess images using the absolute path
         processed_images = preprocess_train(examples, dataset_abs_path, image_transforms, args.image_column)
 
@@ -407,12 +418,10 @@ def main(args):
             transformer, optimizer, train_dataloader, lr_scheduler
         )
 
-    # Move vae and text_encoder to device
-    vae.to(accelerator.device)
-    text_encoder[0].to(accelerator.device)
-    text_encoder[1].to(accelerator.device)
+    # Move text_encoder to device
+    text_encoder.to(accelerator.device)
+    text_encoder_2.to(accelerator.device)
     if args.mixed_precision == "fp16":
-        vae.to(dtype=torch.float16)
         # Text encoder precision depends on the model, often kept in fp32 or needs specific handling
         # text_encoder.to(dtype=torch.float16)
 
@@ -459,18 +468,24 @@ def main(args):
             with accelerator.accumulate(transformer): # Use transformer here
                 # Convert images to latent space
                 with torch.no_grad(): # VAE encoding should not require gradients
-                    latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    # Ensure pixel_values are on the correct device before encoding
+                    pixel_values_device = batch["pixel_values"].to(accelerator.device)
+                    latents = vae.encode(pixel_values_device).latent_dist.sample()
+                    # No need to cast pixel_values to weight_dtype here, VAE handles it if cast correctly.
+                    # latents = vae.encode(batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                 latents = latents * vae.config.scaling_factor
+                # Ensure latents are on the correct device after encoding
+                latents = latents.to(accelerator.device)
 
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
-                    prompt_embeds_outputs = text_encoder[0](
+                    prompt_embeds_outputs = text_encoder(
                         batch["input_ids"],
                         output_hidden_states=True,
                     )
                     prompt_embeds = prompt_embeds_outputs.hidden_states[-2] # Use penultimate layer as recommended
 
-                    prompt_embeds_t5_outputs = text_encoder[1](
+                    prompt_embeds_t5_outputs = text_encoder_2(
                         batch["input_ids_2"],
                         output_hidden_states=True,
                     )
@@ -483,7 +498,7 @@ def main(args):
                 bsz = latents.shape[0]
 
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
                 # Predict the noise residual using the transformer model
@@ -563,17 +578,22 @@ def main(args):
             for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
-                    latents = vae.encode(val_batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
+                    # Ensure pixel_values are on the correct device before encoding
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device)
+                    latents = vae.encode(pixel_values_device).latent_dist.sample()
+                    # No need to cast pixel_values to weight_dtype here, VAE handles it if cast correctly.
+                    # latents = vae.encode(val_batch["pixel_values"].to(dtype=weight_dtype)).latent_dist.sample()
                     latents = latents * vae.config.scaling_factor
+                    latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
                     # Encode prompts for validation batch
-                    prompt_embeds_outputs = text_encoder[0](
+                    prompt_embeds_outputs = text_encoder(
                         val_batch["input_ids"],
                         output_hidden_states=True,
                     )
                     prompt_embeds = prompt_embeds_outputs.hidden_states[-2]
 
-                    prompt_embeds_t5_outputs = text_encoder[1](
+                    prompt_embeds_t5_outputs = text_encoder_2(
                         val_batch["input_ids_2"],
                         output_hidden_states=True,
                     )
@@ -583,7 +603,7 @@ def main(args):
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents)
                     bsz = latents.shape[0]
-                    timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                     timesteps = timesteps.long()
 
                     # Predict noise using the model
