@@ -424,11 +424,15 @@ def main(args):
     text_encoder.to(accelerator.device)
     text_encoder_2.to(accelerator.device)
 
-    # Recalculate total training steps / number of update steps per epoch if max_train_steps set
-    if args.max_train_steps > 0:
-        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    # --- Calculate Training Steps --- 
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if args.max_train_steps is not None and args.max_train_steps > 0:
         max_train_steps = args.max_train_steps
-        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
+        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch) # Recalculate epochs based on max_train_steps
+        logger.info(f"Training for a fixed {max_train_steps} steps, overriding epochs to {args.epochs}.")
+    else:
+        max_train_steps = args.epochs * num_update_steps_per_epoch
+        logger.info(f"Training for {args.epochs} epochs, corresponding to {max_train_steps} steps.")
 
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
