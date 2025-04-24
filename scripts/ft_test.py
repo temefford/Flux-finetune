@@ -30,15 +30,192 @@ from transformers import AutoTokenizer
 logger = get_logger(__name__, log_level="INFO")
 
 # --- Argument Parsing ---
-def parse_args(config_path):
-    with open(config_path, 'r') as f:
+def load_config(config_file):
+    with open(config_file, 'r') as f:
         config = yaml.safe_load(f)
-    # Simple conversion to Namespace for dot notation access
-    args = argparse.Namespace(**config)
-    # Resolve relative paths from config location
-    config_dir = Path(config_path).parent
-    args.output_dir = str(config_dir / args.output_dir)
-    args.dataset_path = str(config_dir / args.dataset_path)
+    return config
+
+def parse_args():
+    parser = argparse.ArgumentParser(description="Fine-tune FLUX model.")
+    # --- Key Arguments ---
+    parser.add_argument(
+        "--model_id",
+        type=str,
+        default="black-forest-labs/FLUX.1-schnell",
+        help="Model identifier from the Hugging Face Hub.",
+    )
+    parser.add_argument(
+        "--config",
+        type=str,
+        default=None,
+        help="Path to the configuration YAML file.",
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=None,
+        help="A folder containing the training data (used if dataset_name/train_data_dir not set). Convenience arg."
+    )
+    parser.add_argument(
+        "--train_data_dir",
+        type=str,
+        default=None,
+        help="A folder containing the training data.",
+    )
+    parser.add_argument(
+        "--output_dir",
+        type=str,
+        default=None,
+        help="The output directory where the model predictions and checkpoints will be written.",
+    )
+    parser.add_argument(
+        "--dataset_path",
+        type=str,
+        default=None,
+        help="Path to the dataset JSON file.",
+    )
+    parser.add_argument(
+        "--batch_size",
+        type=int,
+        default=16,
+        help="Batch size (per device) for the training dataloader.",
+    )
+    parser.add_argument(
+        "--epochs",
+        type=int,
+        default=3,
+        help="Number of epochs to train for.",
+    )
+    parser.add_argument(
+        "--learning_rate",
+        type=float,
+        default=1e-4,
+        help="The initial learning rate for AdamW weight decay.",
+    )
+    parser.add_argument(
+        "--mixed_precision",
+        type=str,
+        default=None,
+        help="Mixed precision training with apex.Only bfloat16 is supported.",
+    )
+    parser.add_argument(
+        "--gradient_accumulation_steps",
+        type=int,
+        default=1,
+        help="Number of updates steps to accumulate before performing a backward/update pass.",
+    )
+    parser.add_argument(
+        "--local_rank",
+        type=int,
+        default=-1,
+        help="For distributed training: local_rank",
+    )
+    parser.add_argument(
+        "--peft_method",
+        type=str,
+        default="LoRA",
+        help="PEFT method to use (currently only LoRA is supported).",
+    )
+    parser.add_argument(
+        "--lora_rank",
+        type=int,
+        default=32,
+        help="Rank of the LoRA layers.",
+    )
+    parser.add_argument(
+        "--lora_target_modules",
+        type=list,
+        default=["to_q", "to_k", "to_v"],
+        help="Target modules for LoRA.",
+    )
+    parser.add_argument(
+        "--image_resolution",
+        type=int,
+        default=512,
+        help="Resolution of the images to be generated.",
+    )
+    parser.add_argument(
+        "--validation_prompts",
+        type=list,
+        default=["a photo of an astronaut riding a triceratops"],
+        help="Prompts to use for validation.",
+    )
+    parser.add_argument(
+        "--validation_batch_size",
+        type=int,
+        default=None,
+        help="Batch size (per device) for the validation dataloader.",
+    )
+    parser.add_argument(
+        "--dataloader_num_workers",
+        type=int,
+        default=None,
+        help="Number of workers for the dataloader.",
+    )
+    parser.add_argument(
+        "--preprocessing_num_workers",
+        type=int,
+        default=None,
+        help="Number of workers for the preprocessing.",
+    )
+    parser.add_argument(
+        "--checkpointing_steps",
+        type=int,
+        default=None,
+        help="Save a checkpoint every X updates steps.",
+    )
+    parser.add_argument(
+        "--max_train_steps",
+        type=int,
+        default=None,
+        help="Total number of training steps to perform.",
+    )
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=None,
+        help="Seed for all random number generators.",
+    )
+    parser.add_argument(
+        "--val_split",
+        type=float,
+        default=None,
+        help="Fraction of the dataset to use for validation.",
+    )
+    parser.add_argument(
+        "--log_level",
+        type=str,
+        default="INFO",
+        help="Logging level (DEBUG, INFO, WARNING, ERROR)",
+    )
+
+    args = parser.parse_args()
+
+    # Load from config file if --config is provided
+    if args.config:
+        config = load_config(args.config)
+        # Update args with config values, command line takes precedence
+        for key, value in config.items():
+            if getattr(args, key, None) is None: # Only set if not provided via command line
+                # Handle special cases like lists if necessary
+                if key == 'lora_target_modules' and isinstance(value, list):
+                    setattr(args, key, value)
+                elif key == 'validation_prompts' and isinstance(value, list):
+                    setattr(args, key, value)
+                elif hasattr(args, key): # Check if arg exists
+                    setattr(args, key, value)
+                else:
+                    logging.warning(f"Config key '{key}' not found in ArgumentParser, skipping.")
+    # Set train_data_dir from data_dir if data_dir is given and train_data_dir isn't
+    # Command-line --train_data_dir takes precedence over config, which takes precedence over --data_dir
+    if args.train_data_dir is None and args.data_dir:
+         logger.info(f"Using --data_dir '{args.data_dir}' as train_data_dir.")
+         args.train_data_dir = args.data_dir
+
+    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
+    if env_local_rank != -1 and env_local_rank != args.local_rank:
+        args.local_rank = env_local_rank
+
     return args
 
 # --- Data Preprocessing ---
@@ -663,10 +840,10 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
-    # Call the main argument parsing function which handles CLI args and config file
-    args = parse_args()
-    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
-    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
+    args = parse_args() # Handles CLI args & config merging
+    # Set defaults for args often not in config (can be overridden by CLI/config)
+    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size) # Default val bs to train bs
+    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 0) # Default workers to 0 for simplicity
     args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
     args.checkpointing_steps = getattr(args, 'checkpointing_steps', 0) # Default disable periodic if using best
     args.max_train_steps = getattr(args, 'max_train_steps', -1) # Default no max steps
