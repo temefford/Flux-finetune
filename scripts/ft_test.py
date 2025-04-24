@@ -318,74 +318,6 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
         "attention_mask_2": attention_mask_2,
     }
 
-def preprocess_func(examples):
-    # Handle image loading based on dataset type
-    if args.dataset_type == "imagefolder":
-        # Assumes 'image' column from imagefolder loader contains PIL Images
-        images = [img.convert("RGB") for img in examples['image']]
-    elif args.dataset_type == "hf_metadata":
-        # Construct full path if image_column contains relative paths
-        image_paths = [os.path.join(args.train_data_dir, img_path) for img_path in examples[args.image_column]]
-        try:
-            images = [Image.open(p).convert("RGB") for p in image_paths]
-        except FileNotFoundError as e:
-            logger.error(f"Image file not found: {e}. Check paths in metadata relative to {args.train_data_dir}")
-            raise e
-    elif args.dataset_type == "hf_dataset":
-        # Adapt based on the specific HF dataset's image column name/format
-        if args.image_column not in examples:
-            raise ValueError(f"Expected image column '{args.image_column}' not found in HF dataset batch.")
-        img_data = examples[args.image_column]
-        images = []
-        for item in img_data:
-            if isinstance(item, str): # Path
-                try:
-                    images.append(Image.open(item).convert("RGB"))
-                except FileNotFoundError as e:
-                    logger.error(f"Image file not found: {e}. Check paths in HF dataset.")
-                    raise e
-            elif isinstance(item, Image.Image): # PIL Image
-                images.append(item.convert("RGB"))
-            else:
-                raise TypeError(f"Unsupported image data type in HF dataset: {type(item)}")
-    else:
-        raise ValueError(f"Preprocessing not implemented for dataset_type: {args.dataset_type}")
-
-    examples["pixel_values"] = [image_transforms(image) for image in images]
-
-    # Handle captions based on dataset type
-    use_captions = False
-    if args.dataset_type != "imagefolder":
-        # Only attempt to use captions if NOT imagefolder
-        if args.caption_column and args.caption_column in examples:
-            use_captions = True
-        else:
-            logger.warning(
-                f"Caption column '{args.caption_column}' not specified or not found in '{args.dataset_type}' dataset. "
-                f"Generating dummy captions."
-            )
-    # else: dataset_type is imagefolder, always generate dummy captions
-
-    if use_captions:
-        tokenized_captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column)
-        examples["input_ids"] = tokenized_captions["input_ids"]
-        examples["attention_mask"] = tokenized_captions["attention_mask"]
-        examples["input_ids_2"] = tokenized_captions["input_ids_2"]
-        examples["attention_mask_2"] = tokenized_captions["attention_mask_2"]
-    else:
-        # Generate dummy/empty captions
-        num_examples = len(images)
-        # Using numpy return format initially as it might be easier for simple cases
-        # Important: Needs to return PyTorch tensors eventually for the model
-        dummy_clip_tokens = tokenizer[0]([""] * num_examples, max_length=tokenizer[0].model_max_length, padding="max_length", truncation=True, return_tensors="np")
-        dummy_t5_tokens = tokenizer[1]([""] * num_examples, max_length=tokenizer[1].model_max_length, padding="max_length", truncation=True, return_tensors="np")
-        examples["input_ids"] = dummy_clip_tokens["input_ids"]
-        examples["attention_mask"] = dummy_clip_tokens["attention_mask"]
-        examples["input_ids_2"] = dummy_t5_tokens["input_ids"]
-        examples["attention_mask_2"] = dummy_t5_tokens["attention_mask_2"]
-
-    return examples
-
 # --- Main Function ---
 def main(args):
     logging_dir = Path(args.output_dir, "logs")
@@ -524,6 +456,76 @@ def main(args):
             transforms.Normalize([0.5], [0.5]), # Standard normalization for [-1, 1] range
         ]
     )
+
+    # --- Preprocessing Function (defined inside main to access tokenizer/transforms) ---
+    def preprocess_func(examples):
+        # Handle image loading based on dataset type
+        if args.dataset_type == "imagefolder":
+            # Assumes 'image' column from imagefolder loader contains PIL Images
+            images = [img.convert("RGB") for img in examples['image']]
+        elif args.dataset_type == "hf_metadata":
+            # Construct full path if image_column contains relative paths
+            image_paths = [os.path.join(args.train_data_dir, img_path) for img_path in examples[args.image_column]]
+            try:
+                images = [Image.open(p).convert("RGB") for p in image_paths]
+            except FileNotFoundError as e:
+                logger.error(f"Image file not found: {e}. Check paths in metadata relative to {args.train_data_dir}")
+                raise e
+        elif args.dataset_type == "hf_dataset":
+            # Adapt based on the specific HF dataset's image column name/format
+            if args.image_column not in examples:
+                raise ValueError(f"Expected image column '{args.image_column}' not found in HF dataset batch.")
+            img_data = examples[args.image_column]
+            images = []
+            for item in img_data:
+                if isinstance(item, str): # Path
+                    try:
+                        images.append(Image.open(item).convert("RGB"))
+                    except FileNotFoundError as e:
+                        logger.error(f"Image file not found: {e}. Check paths in HF dataset.")
+                        raise e
+                elif isinstance(item, Image.Image): # PIL Image
+                    images.append(item.convert("RGB"))
+                else:
+                    raise TypeError(f"Unsupported image data type in HF dataset: {type(item)}")
+        else:
+            raise ValueError(f"Preprocessing not implemented for dataset_type: {args.dataset_type}")
+
+        # Use the image_transforms defined in main's scope
+        examples["pixel_values"] = [image_transforms(image) for image in images]
+
+        # Handle captions based on dataset type
+        use_captions = False
+        if args.dataset_type != "imagefolder":
+            # Only attempt to use captions if NOT imagefolder
+            if args.caption_column and args.caption_column in examples:
+                use_captions = True
+            else:
+                logger.warning(
+                    f"Caption column '{args.caption_column}' not specified or not found in '{args.dataset_type}' dataset. "
+                    f"Generating dummy captions."
+                )
+        # else: dataset_type is imagefolder, always generate dummy captions
+
+        if use_captions:
+            # Use the tokenizer defined in main's scope
+            tokenized_captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column)
+            examples["input_ids"] = tokenized_captions["input_ids"]
+            examples["attention_mask"] = tokenized_captions["attention_mask"]
+            examples["input_ids_2"] = tokenized_captions["input_ids_2"]
+            examples["attention_mask_2"] = tokenized_captions["attention_mask_2"]
+        else:
+            # Generate dummy/empty captions
+            num_examples = len(images)
+            # Use the tokenizer defined in main's scope
+            dummy_clip_tokens = tokenizer[0]([""] * num_examples, max_length=tokenizer[0].model_max_length, padding="max_length", truncation=True, return_tensors="np")
+            dummy_t5_tokens = tokenizer[1]([""] * num_examples, max_length=tokenizer[1].model_max_length, padding="max_length", truncation=True, return_tensors="np")
+            examples["input_ids"] = dummy_clip_tokens["input_ids"]
+            examples["attention_mask"] = dummy_clip_tokens["attention_mask"]
+            examples["input_ids_2"] = dummy_t5_tokens["input_ids"]
+            examples["attention_mask_2"] = dummy_t5_tokens["attention_mask_2"]
+
+        return examples
 
     # Set the transform for on-the-fly preprocessing using the correct function
     logger.info("Setting transform for training data...")
