@@ -20,12 +20,19 @@ from diffusers import FluxPipeline
 from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
 from diffusers.utils.torch_utils import is_compiled_module
-from peft import LoraConfig, PeftModel
+from peft import LoraConfig, PeftModel, get_peft_model_state_dict
 from peft.utils import get_peft_model_state_dict
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
+
+# Configure standard logging basic settings BEFORE parsing args or initializing accelerate
+logging.basicConfig(
+    level=logging.INFO, # Set default level, can be overridden by args later if needed
+    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
+    datefmt="%m/%d/%Y %H:%M:%S",
+)
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -209,7 +216,7 @@ def parse_args():
     # Set train_data_dir from data_dir if data_dir is given and train_data_dir isn't
     # Command-line --train_data_dir takes precedence over config, which takes precedence over --data_dir
     if args.train_data_dir is None and args.data_dir:
-         logger.info(f"Using --data_dir '{args.data_dir}' as train_data_dir.")
+         logging.info(f"Using --data_dir '{args.data_dir}' as train_data_dir.")
          args.train_data_dir = args.data_dir
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
