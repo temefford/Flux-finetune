@@ -236,12 +236,8 @@ def main(args):
         logger.info(f"Transformer class: {transformer.__class__.__name__}")
         logger.info(f"VAE configured latent channels: {vae.config.latent_channels}")
         logger.info(f"Transformer configured input channels: {transformer.config.in_channels}")
-
-        # Log actual loaded weight shape for x_embedder
-        try:
-            logger.info(f"Transformer x_embedder weight shape: {transformer.config.get('x_embedder_config', {}).get('weight', 'N/A')}")
-        except AttributeError:
-            logger.error("Transformer does not have an 'x_embedder' attribute or it lacks weights.")
+        logger.info(f"Transformer cross_attention_dim: {getattr(transformer.config, 'cross_attention_dim', 'N/A')}") # Added logging
+        logger.info("Transformer x_embedder weight shape: N/A") # Placeholder, adjust if needed
 
         tokenizer = pipeline.tokenizer
         tokenizer_2 = pipeline.tokenizer_2
@@ -568,7 +564,7 @@ def main(args):
                     hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP sequence embeddings
-                    pooled_projections=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
+                    pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -687,7 +683,7 @@ def main(args):
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
-                        pooled_projections=prompt_embeds_2.to(accelerator.device),
+                        pooled_projections=clip_pooled.to(accelerator.device),
                     ).sample
 
                     # Assume target is noise for validation loss calculation
