@@ -484,12 +484,11 @@ def main(args):
                     )
                     prompt_embeds = prompt_embeds_outputs.hidden_states[-2] # Use penultimate layer as recommended
 
-                    prompt_embeds_t5_outputs = text_encoder_2(
+                    prompt_embeds_2 = text_encoder_2(
                         batch["input_ids_2"],
                         output_hidden_states=True,
-                    )
-                    prompt_embeds_t5 = prompt_embeds_t5_outputs.hidden_states[-1] # Usually last layer for T5
-                    pooled_projections = prompt_embeds_t5_outputs.hidden_states[0] # Placeholder - Check FLUX requirements for pooled embeds
+                    ).hidden_states[-1] # Usually last layer for T5
+                    pooled_projections = prompt_embeds_2 # Placeholder - Check FLUX requirements for pooled embeds
                     # Need to confirm the correct way to get pooled_projections for FLUX
 
                 # Sample noise that we'll use as the target
@@ -506,7 +505,8 @@ def main(args):
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
                     pooled_projections=pooled_projections.to(accelerator.device), # T5 pooled embeds (Correct name)
-                    input_ids_t5=batch["input_ids_2"].to(accelerator.device) # T5 ids (Correct name & device)
+                    encoder_hidden_states_t5=prompt_embeds_2.to(accelerator.device), # T5 sequence embeds
+                    encoder_attention_mask_t5=batch["attention_mask_2"].to(accelerator.device) # T5 attention mask
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -589,12 +589,11 @@ def main(args):
                     )
                     prompt_embeds = prompt_embeds_outputs.hidden_states[-2]
 
-                    prompt_embeds_t5_outputs = text_encoder_2(
+                    prompt_embeds_2 = text_encoder_2(
                         val_batch["input_ids_2"],
                         output_hidden_states=True,
-                    )
-                    prompt_embeds_t5 = prompt_embeds_t5_outputs.hidden_states[-1]
-                    pooled_projections = prompt_embeds_t5_outputs.hidden_states[0] # Placeholder
+                    ).hidden_states[-1]
+                    pooled_projections = prompt_embeds_2 # Placeholder
 
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents)
@@ -608,7 +607,8 @@ def main(args):
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
                         pooled_projections=pooled_projections.to(accelerator.device), # Correct name
-                        input_ids_t5=val_batch["input_ids_2"].to(accelerator.device) # T5 ids (Correct name & device)
+                        encoder_hidden_states_t5=prompt_embeds_2.to(accelerator.device), # T5 sequence embeds
+                        encoder_attention_mask_t5=val_batch["attention_mask_2"].to(accelerator.device) # T5 attention mask
                     ).sample
 
                     # Assume target is noise for validation loss calculation
