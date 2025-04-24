@@ -421,15 +421,11 @@ def main(args):
     # Move text_encoder to device
     text_encoder.to(accelerator.device)
     text_encoder_2.to(accelerator.device)
-    if args.mixed_precision == "fp16":
-        # Text encoder precision depends on the model, often kept in fp32 or needs specific handling
-        # text_encoder.to(dtype=torch.float16)
 
-    # --- Training Loop ---
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    max_train_steps = args.epochs * num_update_steps_per_epoch
-    if args.max_train_steps is not None and args.max_train_steps > 0:
-        max_train_steps = min(max_train_steps, args.max_train_steps)
+    # Recalculate total training steps / number of update steps per epoch if max_train_steps set
+    if args.max_train_steps > 0:
+        num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+        max_train_steps = args.max_train_steps
         args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
 
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
