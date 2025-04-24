@@ -20,256 +20,25 @@ from diffusers import FluxPipeline
 from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
 from diffusers.utils.torch_utils import is_compiled_module
-from peft import LoraConfig, PeftModel, get_peft_model_state_dict
+from peft import LoraConfig, PeftModel
+from peft.utils import get_peft_model_state_dict
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
 from transformers import AutoTokenizer
 
-# Configure standard logging basic settings BEFORE parsing args or initializing accelerate
-logging.basicConfig(
-    level=logging.INFO, # Set default level, can be overridden by args later if needed
-    format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-    datefmt="%m/%d/%Y %H:%M:%S",
-)
-
 logger = get_logger(__name__, log_level="INFO")
 
 # --- Argument Parsing ---
-def load_config(config_file):
-    with open(config_file, 'r') as f:
+def parse_args(config_path):
+    with open(config_path, 'r') as f:
         config = yaml.safe_load(f)
-    return config
-
-def parse_args():
-    parser = argparse.ArgumentParser(description="Fine-tune FLUX model.")
-    # --- Key Arguments ---
-    parser.add_argument(
-        "--model_id",
-        type=str,
-        default="black-forest-labs/FLUX.1-schnell",
-        help="Model identifier from the Hugging Face Hub.",
-    )
-    parser.add_argument(
-        "--config",
-        type=str,
-        default=None,
-        help="Path to the configuration YAML file.",
-    )
-    parser.add_argument(
-        "--data_dir",
-        type=str,
-        default=None,
-        help="A folder containing the training data (used if dataset_name/train_data_dir not set). Convenience arg."
-    )
-    parser.add_argument(
-        "--dataset_type",
-        type=str,
-        default="imagefolder", # Default to imagefolder
-        choices=["imagefolder", "hf_metadata", "hf_dataset"], # Add choices if known
-        help="Type of dataset structure."
-    )
-    parser.add_argument(
-        "--image_column",
-        type=str,
-        default=None, # Default to None, relevant for metadata/hf types
-        help="Column name for image paths in metadata/HF datasets."
-    )
-    parser.add_argument(
-        "--caption_column",
-        type=str,
-        default=None, # Default to None, relevant for metadata/hf types
-        help="Column name for captions in metadata/HF datasets."
-    )
-    parser.add_argument(
-        "--train_data_dir",
-        type=str,
-        default=None,
-        help="A folder containing the training data.",
-    )
-    parser.add_argument(
-        "--output_dir",
-        type=str,
-        default=None,
-        help="The output directory where the model predictions and checkpoints will be written.",
-    )
-    parser.add_argument(
-        "--dataset_path",
-        type=str,
-        default=None,
-        help="Path to the dataset JSON file.",
-    )
-    parser.add_argument(
-        "--batch_size",
-        type=int,
-        default=16,
-        help="Batch size (per device) for the training dataloader.",
-    )
-    parser.add_argument(
-        "--epochs",
-        type=int,
-        default=3,
-        help="Number of epochs to train for.",
-    )
-    parser.add_argument(
-        "--learning_rate",
-        type=float,
-        default=1e-4,
-        help="The initial learning rate for AdamW weight decay.",
-    )
-    parser.add_argument(
-        "--mixed_precision",
-        type=str,
-        default=None,
-        help="Mixed precision training with apex.Only bfloat16 is supported.",
-    )
-    parser.add_argument(
-        "--gradient_accumulation_steps",
-        type=int,
-        default=1,
-        help="Number of updates steps to accumulate before performing a backward/update pass.",
-    )
-    parser.add_argument(
-        "--local_rank",
-        type=int,
-        default=-1,
-        help="For distributed training: local_rank",
-    )
-    parser.add_argument(
-        "--peft_method",
-        type=str,
-        default="LoRA",
-        help="PEFT method to use (currently only LoRA is supported).",
-    )
-    parser.add_argument(
-        "--lora_rank",
-        type=int,
-        default=32,
-        help="Rank of the LoRA layers.",
-    )
-    parser.add_argument(
-        "--lora_target_modules",
-        type=list,
-        default=["to_q", "to_k", "to_v"],
-        help="Target modules for LoRA.",
-    )
-    parser.add_argument(
-        "--image_resolution",
-        type=int,
-        default=512,
-        help="Resolution of the images to be generated.",
-    )
-    parser.add_argument(
-        "--validation_prompts",
-        type=list,
-        default=["a photo of an astronaut riding a triceratops"],
-        help="Prompts to use for validation.",
-    )
-    parser.add_argument(
-        "--validation_batch_size",
-        type=int,
-        default=None,
-        help="Batch size (per device) for the validation dataloader.",
-    )
-    parser.add_argument(
-        "--dataloader_num_workers",
-        type=int,
-        default=None,
-        help="Number of workers for the dataloader.",
-    )
-    parser.add_argument(
-        "--preprocessing_num_workers",
-        type=int,
-        default=None,
-        help="Number of workers for the preprocessing.",
-    )
-    parser.add_argument(
-        "--checkpointing_steps",
-        type=int,
-        default=None,
-        help="Save a checkpoint every X updates steps.",
-    )
-    parser.add_argument(
-        "--max_train_steps",
-        type=int,
-        default=None,
-        help="Total number of training steps to perform.",
-    )
-    parser.add_argument(
-        "--seed",
-        type=int,
-        default=None,
-        help="Seed for all random number generators.",
-    )
-    parser.add_argument(
-        "--val_split",
-        type=float,
-        default=None,
-        help="Fraction of the dataset to use for validation.",
-    )
-    parser.add_argument(
-        "--log_level",
-        type=str,
-        default="INFO",
-        help="Logging level (DEBUG, INFO, WARNING, ERROR)",
-    )
-
-    args = parser.parse_args()
-
-    config_values = {}
-    if args.config:
-        config = load_config(args.config)
-        config_values = config # Store config values separately
-
-    # Update args: CLI args override config values
-    for key, value in config_values.items():
-        # Check if the argument was NOT provided via command line
-        if getattr(args, key, None) is None:
-            # Check if the argument actually exists in the parser
-            if hasattr(args, key):
-                setattr(args, key, value)
-            else:
-                # Don't warn for commented-out keys like dataset_path if they aren't in parser
-                # But do warn for keys explicitly defined in the parser but missing in config logic
-                if key in parser._option_string_actions:
-                    logging.warning(f"Config key '{key}' is defined in config but might not be handled correctly or is unused.")
-                # else: # Key not in parser, likely commented out or typo - ignore silently
-                #    pass 
-
-    # Determine the final train_data_dir based on precedence:
-    # 1. CLI --train_data_dir
-    # 2. CLI --data_dir
-    # 3. Config 'train_data_dir'
-    # 4. Config 'dataset_path' (legacy/fallback)
-    final_train_data_dir = None
-    if args.train_data_dir: # CLI --train_data_dir has highest priority
-        final_train_data_dir = args.train_data_dir
-        logging.info(f"Using --train_data_dir from CLI: {final_train_data_dir}")
-    elif args.data_dir: # CLI --data_dir is next
-        final_train_data_dir = args.data_dir
-        logging.info(f"Using --data_dir from CLI as train_data_dir: {final_train_data_dir}")
-    elif 'train_data_dir' in config_values and config_values['train_data_dir'] is not None:
-        final_train_data_dir = config_values['train_data_dir']
-        logging.info(f"Using 'train_data_dir' from config: {final_train_data_dir}")
-    elif 'dataset_path' in config_values and config_values['dataset_path'] is not None: # Check legacy config key
-        # Check if dataset_path was actually commented out by checking its value type
-        # This is imperfect, relies on YAML comments not being loaded as strings
-        if isinstance(config_values.get('dataset_path'), str):
-            final_train_data_dir = config_values['dataset_path']
-            logging.warning(f"Using legacy 'dataset_path' from config as train_data_dir: {final_train_data_dir}. Consider using 'train_data_dir' instead.")
-
-    # Assign the determined path back to args.train_data_dir
-    args.train_data_dir = final_train_data_dir
-
-    # Check if a data directory was actually determined
-    if args.train_data_dir is None:
-        # Maybe raise error or default depending on whether it's required
-        logging.warning("No training data directory specified via --train_data_dir, --data_dir, or config file.")
-
-    env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
-    if env_local_rank != -1 and env_local_rank != args.local_rank:
-        args.local_rank = env_local_rank
-
+    # Simple conversion to Namespace for dot notation access
+    args = argparse.Namespace(**config)
+    # Resolve relative paths from config location
+    config_dir = Path(config_path).parent
+    args.output_dir = str(config_dir / args.output_dir)
+    args.dataset_path = str(config_dir / args.dataset_path)
     return args
 
 # --- Data Preprocessing ---
@@ -317,6 +86,24 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
         "input_ids_2": input_ids_2,
         "attention_mask_2": attention_mask_2,
     }
+
+def preprocess_train(examples, dataset_abs_path, image_transforms):
+    """Preprocesses a batch of training examples."""
+    try:
+        # Construct absolute path for images
+        images = [Image.open(os.path.join(dataset_abs_path, fn)).convert("RGB") for fn in examples["file_name"]]
+        examples["pixel_values"] = [image_transforms(image) for image in images]
+    except FileNotFoundError as e:
+        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
+        # Decide how to handle: skip batch, raise error, etc.
+        # For now, let's add a placeholder or skip - adding None might cause issues later
+        # Safest might be to ensure paths are correct before this step.
+        # Re-raising for now to make the error visible.
+        raise e
+    except Exception as e:
+        logger.error(f"Error during image preprocessing: {e}")
+        raise e
+    return examples
 
 # --- Main Function ---
 def main(args):
@@ -411,11 +198,10 @@ def main(args):
     )
 
     # --- Dataset Loading and Preprocessing ---
-    logger.info(f"Loading dataset. Type: {args.dataset_type}, Path: {args.train_data_dir}")
-
-    # Get the tokenizers
-
-    metadata_file = os.path.join(args.train_data_dir, "metadata.json") # Use absolute path for metadata too
+    # Calculate absolute dataset path relative to the script's location
+    script_dir = os.path.dirname(__file__)
+    dataset_abs_path = os.path.abspath(os.path.join(script_dir, args.dataset_path))
+    metadata_file = os.path.join(dataset_abs_path, "metadata.json") # Use absolute path for metadata too
     logger.info(f"Attempting to load dataset metadata from: {metadata_file}")
 
     if not os.path.exists(metadata_file):
@@ -434,18 +220,20 @@ def main(args):
         return
 
     # --- Split Dataset --- #
-    if args.val_split is not None and 0 < args.val_split < 1:
+    if args.val_split > 0.0:
+        if not (0 < args.val_split < 1):
+            raise ValueError("val_split must be between 0 and 1 (exclusive)")
         logger.info(f"Splitting dataset with validation split: {args.val_split}")
-        # Ensure dataset object exists before splitting
-        if 'dataset' not in locals():
-            raise RuntimeError("Dataset object was not loaded correctly before attempting split.")
+        # Use the datasets library's built-in splitting method
         split_dataset = dataset.train_test_split(test_size=args.val_split, seed=args.seed)
         train_dataset = split_dataset["train"]
-        eval_dataset = split_dataset["test"]
+        val_dataset = split_dataset["test"]
+        logger.info(f"  Training samples: {len(train_dataset)}")
+        logger.info(f"  Validation samples: {len(val_dataset)}")
     else:
-        logger.info("Using full dataset for training, no validation split.")
         train_dataset = dataset
-        eval_dataset = None
+        val_dataset = None
+        logger.info(f"Using full dataset for training: {len(train_dataset)} samples.")
 
     # Define image transformations
     image_transforms = transforms.Compose(
@@ -457,85 +245,35 @@ def main(args):
         ]
     )
 
-    # --- Preprocessing Function (defined inside main to access tokenizer/transforms) ---
+    # Define the preprocessing function with necessary arguments captured
     def preprocess_func(examples):
-        # Handle image loading based on dataset type
-        if args.dataset_type == "imagefolder":
-            # Assumes 'image' column from imagefolder loader contains PIL Images
-            images = [img.convert("RGB") for img in examples['image']]
-        elif args.dataset_type == "hf_metadata":
-            # Construct full path if image_column contains relative paths
-            image_paths = [os.path.join(args.train_data_dir, img_path) for img_path in examples[args.image_column]]
-            try:
-                images = [Image.open(p).convert("RGB") for p in image_paths]
-            except FileNotFoundError as e:
-                logger.error(f"Image file not found: {e}. Check paths in metadata relative to {args.train_data_dir}")
-                raise e
-        elif args.dataset_type == "hf_dataset":
-            # Adapt based on the specific HF dataset's image column name/format
-            if args.image_column not in examples:
-                raise ValueError(f"Expected image column '{args.image_column}' not found in HF dataset batch.")
-            img_data = examples[args.image_column]
-            images = []
-            for item in img_data:
-                if isinstance(item, str): # Path
-                    try:
-                        images.append(Image.open(item).convert("RGB"))
-                    except FileNotFoundError as e:
-                        logger.error(f"Image file not found: {e}. Check paths in HF dataset.")
-                        raise e
-                elif isinstance(item, Image.Image): # PIL Image
-                    images.append(item.convert("RGB"))
-                else:
-                    raise TypeError(f"Unsupported image data type in HF dataset: {type(item)}")
-        else:
-            raise ValueError(f"Preprocessing not implemented for dataset_type: {args.dataset_type}")
+        # Tokenize captions using the 'artwork' field
+        captions = tokenize_captions(tokenizer, examples, text_column="artwork")
+        # Preprocess images using the absolute path
+        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms)
 
-        # Use the image_transforms defined in main's scope
-        examples["pixel_values"] = [image_transforms(image) for image in images]
+        # Combine results
+        output = {
+            "pixel_values": processed_images["pixel_values"],
+            "input_ids": captions["input_ids"],
+            "attention_mask": captions["attention_mask"],
+        }
+        # Add text_encoder_2 inputs if they exist
+        if 'input_ids_2' in captions:
+             output['input_ids_2'] = captions['input_ids_2']
+             output['attention_mask_2'] = captions['attention_mask_2']
+        return output
 
-        # Handle captions based on dataset type
-        use_captions = False
-        if args.dataset_type != "imagefolder":
-            # Only attempt to use captions if NOT imagefolder
-            if args.caption_column and args.caption_column in examples:
-                use_captions = True
-            else:
-                logger.warning(
-                    f"Caption column '{args.caption_column}' not specified or not found in '{args.dataset_type}' dataset. "
-                    f"Generating dummy captions."
-                )
-        # else: dataset_type is imagefolder, always generate dummy captions
+    with accelerator.main_process_first():
+        # Apply preprocessing to train dataset
+        logger.info("Preprocessing training data...")
+        train_dataset = train_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=train_dataset.column_names)
+        # Apply preprocessing to val dataset if it exists
+        if val_dataset:
+            logger.info("Preprocessing validation data...")
+            val_dataset = val_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=val_dataset.column_names)
 
-        if use_captions:
-            # Use the tokenizer defined in main's scope
-            tokenized_captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column)
-            examples["input_ids"] = tokenized_captions["input_ids"]
-            examples["attention_mask"] = tokenized_captions["attention_mask"]
-            examples["input_ids_2"] = tokenized_captions["input_ids_2"]
-            examples["attention_mask_2"] = tokenized_captions["attention_mask_2"]
-        else:
-            # Generate dummy/empty captions
-            num_examples = len(images)
-            # Use the tokenizer defined in main's scope
-            dummy_clip_tokens = tokenizer[0]([""] * num_examples, max_length=tokenizer[0].model_max_length, padding="max_length", truncation=True, return_tensors="np")
-            dummy_t5_tokens = tokenizer[1]([""] * num_examples, max_length=tokenizer[1].model_max_length, padding="max_length", truncation=True, return_tensors="np")
-            examples["input_ids"] = dummy_clip_tokens["input_ids"]
-            examples["attention_mask"] = dummy_clip_tokens["attention_mask"]
-            examples["input_ids_2"] = dummy_t5_tokens["input_ids"]
-            examples["attention_mask_2"] = dummy_t5_tokens["attention_mask_2"]
-
-        return examples
-
-    # Set the transform for on-the-fly preprocessing using the correct function
-    logger.info("Setting transform for training data...")
-    train_dataset.set_transform(preprocess_func) # Use the renamed function
-    if eval_dataset:
-        logger.info("Setting transform for validation data...")
-        eval_dataset.set_transform(preprocess_func) # Use the renamed function
-
-    # --- Data Loaders ---
-    # Define collation function (needed if set_transform doesn't handle batching correctly)
+    # Collate function
     def collate_fn(examples):
         pixel_values = torch.stack([torch.tensor(example["pixel_values"]) for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
@@ -566,12 +304,12 @@ def main(args):
         num_workers=args.dataloader_num_workers, # Use arg for num_workers
     )
 
-    # Create validation dataloader if eval_dataset exists
+    # Create validation dataloader if val_dataset exists
     val_dataloader = None
-    if eval_dataset:
+    if val_dataset:
         logger.info("Creating validation dataloader...")
         val_dataloader = torch.utils.data.DataLoader(
-            eval_dataset,
+            val_dataset,
             shuffle=False, # No need to shuffle validation data
             collate_fn=collate_fn,
             batch_size=args.validation_batch_size, # Use specific validation batch size from args
@@ -618,8 +356,8 @@ def main(args):
 
     logger.info("***** Running training *****")
     logger.info(f"  Num training examples = {len(train_dataset)}")
-    if eval_dataset: # Check if eval_dataset was created before logging its length
-        logger.info(f"  Num validation examples = {len(eval_dataset)}")
+    if val_dataset: # Check if val_dataset was created before logging its length
+        logger.info(f"  Num validation examples = {len(val_dataset)}")
     logger.info(f"  Num Epochs = {args.epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -925,10 +663,12 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
-    args = parse_args() # Handles CLI args & config merging
-    # Set defaults for args often not in config (can be overridden by CLI/config)
-    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size) # Default val bs to train bs
-    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 0) # Default workers to 0 for simplicity
+    parser = argparse.ArgumentParser(description="Fine-tune a FLUX model")
+    parser.add_argument("--config", type=str, help="Path to the configuration file")
+    args = parser.parse_args()
+    args = parse_args(args.config)
+    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
     args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
     args.checkpointing_steps = getattr(args, 'checkpointing_steps', 0) # Default disable periodic if using best
     args.max_train_steps = getattr(args, 'max_train_steps', -1) # Default no max steps
