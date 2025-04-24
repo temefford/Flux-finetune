@@ -505,7 +505,7 @@ def main(args):
                 # Convert images to latent space
                 with torch.no_grad(): # VAE encoding should not require gradients
                     # Ensure pixel_values are on the correct device AND dtype
-                    pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
+                    pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=torch.float32) # Cast to float32
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
 
@@ -633,7 +633,7 @@ def main(args):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
                     # Ensure pixel_values are on the correct device and dtype
-                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=torch.float32) # Cast to float32
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
                     logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
 
