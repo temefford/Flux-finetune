@@ -240,7 +240,6 @@ def main(args):
         # Log actual loaded weight shape for x_embedder
         try:
             logger.info(f"Transformer x_embedder weight shape: {transformer.config.get('x_embedder_config', {}).get('weight', 'N/A')}")
-            logger.info(f"Transformer time_text_embed.text_embedder.linear_1 weight shape: {transformer.time_text_embed.text_embedder.linear_1.weight.shape}")
         except AttributeError:
             logger.error("Transformer does not have an 'x_embedder' attribute or it lacks weights.")
 
@@ -298,13 +297,6 @@ def main(args):
         logger.info("VAE output and Transformer input channels match according to configs.")
         vae_to_transformer_projection = None
  
-    # --- T5 Projection Layer (4096 -> 3072) ---
-    t5_input_dim = 4096 # Actual dimension from T5 pooled output
-    t5_expected_dim = 3072 # Expected dimension based on error analysis
-    logger.info(f"Adding T5 projection layer: {t5_input_dim} -> {t5_expected_dim}")
-    t5_projection_layer = torch.nn.Linear(t5_input_dim, t5_expected_dim).to(accelerator.device, dtype=weight_dtype)
-    logger.info("Added T5 projection layer parameters to optimizer.")
- 
     # --- Optimizer Setup --- 
     params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     if vae_to_transformer_projection is not None:
@@ -313,8 +305,6 @@ def main(args):
             param.requires_grad = True 
         params_to_optimize.extend(vae_to_transformer_projection.parameters())
         logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
-    params_to_optimize.extend(t5_projection_layer.parameters())
-    logger.info("Added T5 projection layer parameters to optimizer.")
 
     optimizer = torch.optim.AdamW(
         params_to_optimize,
@@ -549,16 +539,14 @@ def main(args):
                         batch["input_ids"],
                         output_hidden_states=True,
                     )
-                    prompt_embeds = prompt_embeds_outputs.hidden_states[-2] # Use penultimate layer as recommended
+                    prompt_embeds = prompt_embeds_outputs.last_hidden_state # Use penultimate layer as recommended
+                    clip_pooled = prompt_embeds_outputs.pooler_output # CLIP pooled embeddings
 
                     prompt_embeds_2_outputs = text_encoder_2(
                         batch["input_ids_2"],
                         output_hidden_states=True,
                     )
-                    prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state # Use last_hidden_state attribute
-                    pooled_prompt_embeds_2 = prompt_embeds_2[:, 0] # T5 pooled embeddings: last hidden state of the first token
-                    pooled_prompt_embeds_2_projected = t5_projection_layer(pooled_prompt_embeds_2)
-                    logger.debug(f"Projected T5 shape: {pooled_prompt_embeds_2_projected.shape}")
+                    prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state # T5 sequence embeddings
 
                 # Sample noise that we'll use as the target
                 noise = torch.randn_like(latents)
@@ -572,14 +560,16 @@ def main(args):
                 logger.debug(f"Shape BEFORE transformer call - latents: {latents.shape}")
                 logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
                 logger.info(f"Shape BEFORE transformer call - prompt_embeds (CLIP): {prompt_embeds.shape}")
-                logger.info(f"Shape BEFORE transformer call - pooled_prompt_embeds_2_projected (T5): {pooled_prompt_embeds_2_projected.shape}")
+                logger.info(f"Shape BEFORE transformer call - clip_pooled (CLIP): {clip_pooled.shape}")
+                logger.info(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
                     hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
-                    encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
-                    pooled_projections=pooled_prompt_embeds_2_projected.to(accelerator.device), # Projected T5 pooled embeds
+                    encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP sequence embeddings
+                    pooled_projections=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
+                    text_embeds=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -679,20 +669,13 @@ def main(args):
                     # Encode prompts for validation batch
                     with torch.no_grad():
                         # CLIP Embeddings
-                        prompt_embeds_outputs = text_encoder(
-                            val_batch["input_ids"],
-                            output_hidden_states=True,
-                        )
-                        prompt_embeds = prompt_embeds_outputs.hidden_states[-2]
+                        prompt_embeds_outputs = text_encoder(val_batch["input_ids"].to(accelerator.device), output_hidden_states=True)
+                        prompt_embeds = prompt_embeds_outputs.last_hidden_state
+                        clip_pooled = prompt_embeds_outputs.pooler_output
 
-                        prompt_embeds_2_outputs = text_encoder_2(
-                            val_batch["input_ids_2"],
-                            output_hidden_states=True,
-                        )
+                        # T5 Embeddings
+                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"].to(accelerator.device), output_hidden_states=True)
                         prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
-                        pooled_prompt_embeds_2 = prompt_embeds_2[:, 0]
-                        pooled_prompt_embeds_2_projected = t5_projection_layer(pooled_prompt_embeds_2)
-                        logger.debug(f"Validation Projected T5 shape: {pooled_prompt_embeds_2_projected.shape}")
 
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents)
@@ -705,7 +688,8 @@ def main(args):
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
-                        pooled_projections=pooled_prompt_embeds_2_projected.to(accelerator.device),
+                        pooled_projections=prompt_embeds_2.to(accelerator.device),
+                        text_embeds=clip_pooled.to(accelerator.device),
                     ).sample
 
                     # Assume target is noise for validation loss calculation
