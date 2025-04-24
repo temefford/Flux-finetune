@@ -21,7 +21,6 @@ from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
 from diffusers.utils.torch_utils import is_compiled_module
 from peft import LoraConfig, PeftModel, get_peft_model_state_dict
-from peft.utils import get_peft_model_state_dict
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -62,6 +61,13 @@ def parse_args():
         type=str,
         default=None,
         help="A folder containing the training data (used if dataset_name/train_data_dir not set). Convenience arg."
+    )
+    parser.add_argument(
+        "--dataset_type",
+        type=str,
+        default="imagefolder", # Default to imagefolder
+        choices=["imagefolder", "hf_metadata", "hf_dataset"], # Add choices if known
+        help="Type of dataset structure."
     )
     parser.add_argument(
         "--train_data_dir",
@@ -212,7 +218,7 @@ def parse_args():
                 elif hasattr(args, key): # Check if arg exists
                     setattr(args, key, value)
                 else:
-                    logging.warning(f"Config key '{key}' not found in ArgumentParser, skipping.")
+                    logging.warning(f"Config key '{key}' not found in ArgumentParser, skipping.") # Use standard logging explicitly before accelerate is ready
     # Set train_data_dir from data_dir if data_dir is given and train_data_dir isn't
     # Command-line --train_data_dir takes precedence over config, which takes precedence over --data_dir
     if args.train_data_dir is None and args.data_dir:

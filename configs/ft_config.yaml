@@ -13,9 +13,10 @@ seed: 42
 device: "cuda"                 # Use NVIDIA CUDA
 image_resolution: 1024          # Target resolution for FLUX
 checkpointing_steps: 100       # Save checkpoints periodically (adjust based on dataset size/epoch length)
-dataset_path: "/workspace/art" # Absolute path to dataset directory on Runpod
-image_column: "hash"      # Column name for image file paths in metadata.json (use hash as filename base)
-caption_column: "caption"      # Column name for text captions in metadata.json
+# dataset_path: "/workspace/art" # Absolute path to dataset directory on Runpod
+# image_column: "hash"      # Column name for image file paths in metadata.json (use hash as filename base)
+# caption_column: "caption"      # Column name for text captions in metadata.json
+dataset_type: "imagefolder"    # Type of dataset structure (imagefolder, hf_metadata, etc.)
 resolution: 1024
 num_workers: 4                 # Number of subprocesses for data loading
 val_split: 0.1                 # Percentage of data to use for validation (10%)
