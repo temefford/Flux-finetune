@@ -1,0 +1,19 @@
+# Configuration for FLUX.1-schnell LoRA Finetuning on H200 GPU
+
+model_id: "black-forest-labs/FLUX.1-schnell"
+peft_method: "LoRA"
+lora_rank: 8                     # LoRA rank (can be increased later, e.g., 32 or 64)
+learning_rate: 1e-4            # Learning rate
+batch_size: 16                 # Per-device batch size (Adjust based on VRAM)
+gradient_accumulation_steps: 2 # Accumulate gradients (16 * 2 = effective batch size 32)
+epochs: 1                      # Number of training epochs
+mixed_precision: "bf16"        # Use bfloat16 mixed precision for H100/H200
+output_dir: "outputs"          # Relative path from script location (will be created in /workspace/fine-tuning)
+seed: 42
+device: "cuda"                 # Use NVIDIA CUDA
+image_resolution: 1024          # Target resolution for FLUX
+checkpointing_steps: 100       # Save checkpoints periodically (adjust based on dataset size/epoch length)
+dataset_path: "/workspace/art" # Absolute path to dataset directory on Runpod
+num_workers: 4                 # Number of subprocesses for data loading
+val_split: 0.1                 # Percentage of data to use for validation (10%)
+validation_batch_size: 32      # Batch size for validation

@@ -1,0 +1,15 @@
+datasets
+diffusers
+transformers
+accelerate
+peft
+PyYAML
+Pillow
+tqdm
+# torch, torchvision, torchaudio will be installed separately based on CUDA version
+# xformers is optional
+
+# Dependencies for Benchmark Evaluation (calc_clip.py, etc.)
+torchmetrics
+opencv-python-headless
+clip-score
