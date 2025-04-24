@@ -551,6 +551,12 @@ def main(args):
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
+                # Log shapes before transformer call
+                logger.info(f"Shape BEFORE transformer call - latents: {latents.shape}")
+                logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
+                logger.info(f"Shape BEFORE transformer call - prompt_embeds (CLIP): {prompt_embeds.shape}")
+                logger.info(f"Shape BEFORE transformer call - pooled_prompt_embeds_2 (T5): {pooled_prompt_embeds_2.shape}")
+
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
                     hidden_states=latents.to(accelerator.device), # Explicitly move latents
