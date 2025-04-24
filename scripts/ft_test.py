@@ -232,7 +232,10 @@ def main(args):
         vae.to(accelerator.device, dtype=weight_dtype)
         logger.info(f"VAE moved to device {accelerator.device} and cast to {weight_dtype}")
 
-        # >>> Extract Tokenizers <<< 
+        # Log channel configurations to debug potential mismatch
+        logger.info(f"VAE configured latent channels: {vae.config.latent_channels}")
+        logger.info(f"Transformer configured input channels: {transformer.config.in_channels}")
+
         tokenizer = pipeline.tokenizer
         tokenizer_2 = pipeline.tokenizer_2
         logger.info("Tokenizers extracted.")
