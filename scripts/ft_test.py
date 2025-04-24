@@ -10,7 +10,7 @@ import diffusers
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import transformers
+import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -21,9 +21,6 @@ from peft import LoraConfig, PeftModel
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import PretrainedConfig
-import transformers
-from transformers import AutoTokenizer
 
 logger = get_logger(__name__, log_level="INFO")
 
@@ -47,10 +44,10 @@ def parse_args():
         with open(cmd_args.config, 'r') as f:
             config = yaml.safe_load(f)
     except FileNotFoundError:
-        logger.error(f"Configuration file not found at: {cmd_args.config}")
+        logging.error(f"Configuration file not found at: {cmd_args.config}")
         raise
     except Exception as e:
-        logger.error(f"Error loading configuration file {cmd_args.config}: {e}")
+        logging.error(f"Error loading configuration file {cmd_args.config}: {e}")
         raise
 
     # Create Namespace from YAML config
@@ -140,14 +137,14 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column)
         images = [Image.open(os.path.join(image_dir, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
         examples["pixel_values"] = [image_transforms(image) for image in images]
     except FileNotFoundError as e:
-        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
+        logging.error(f"Error opening image: {e}. Check dataset_path and file names.")
         # Decide how to handle: skip batch, raise error, etc.
         # For now, let's add a placeholder or skip - adding None might cause issues later
         # Safest might be to ensure paths are correct before this step.
         # Re-raising for now to make the error visible.
         raise e
     except Exception as e:
-        logger.error(f"Error during image preprocessing: {e}")
+        logging.error(f"Error during image preprocessing: {e}")
         raise e
     return examples
 
@@ -189,11 +186,9 @@ def main(args):
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
         datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
     if args.seed is not None:
