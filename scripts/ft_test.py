@@ -39,15 +39,54 @@ def parse_args():
         help="Path to the configuration YAML file relative to the project root.",
     )
     # Add arguments for data_dir and output_dir to potentially override config
-    args = parser.parse_args()
-    with open(args.config, 'r') as f:
-        config = yaml.safe_load(f)
-    # Simple conversion to Namespace for dot notation access
+    parser.add_argument("--data_dir", type=str, default=None, help="Override dataset path from config.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Override output directory from config.")
+
+    cmd_args = parser.parse_args() # Parse command line args first
+
+    # Load config from YAML file
+    try:
+        with open(cmd_args.config, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        logger.error(f"Configuration file not found at: {cmd_args.config}")
+        raise
+    except Exception as e:
+        logger.error(f"Error loading configuration file {cmd_args.config}: {e}")
+        raise
+
+    # Create Namespace from YAML config
     args = argparse.Namespace(**config)
-    # Resolve relative paths from config location
-    config_dir = Path(args.config).parent
-    args.output_dir = str(config_dir / args.output_dir)
-    args.dataset_path = str(config_dir / args.dataset_path)
+
+    # Apply command-line overrides (if provided)
+    if cmd_args.data_dir:
+        args.dataset_path = cmd_args.data_dir # Note: config key is dataset_path
+        logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
+    if cmd_args.output_dir:
+        args.output_dir = cmd_args.output_dir
+        logger.info(f"Overriding output_dir with command-line value: {args.output_dir}")
+
+    # --- Path Adjustments --- 
+    # Make output_dir relative to the project root (where the script is run from)
+    # Assuming the script is run from the 'finetuning' directory
+    # No adjustment needed if output_dir is already relative like 'outputs'
+    # If output_dir was specified as absolute in YAML or command line, it stays absolute.
+    # Let's ensure it exists
+    if not os.path.isabs(args.output_dir):
+        args.output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Ensure dataset_path is treated as absolute if needed (e.g., /workspace/art)
+    # The config expects an absolute path, so no adjustment needed unless overridden
+    if not hasattr(args, 'dataset_path') or not args.dataset_path:
+         raise ValueError("dataset_path must be specified in the config file or via --data_dir")
+
+    # Add other defaults if missing from config
+    args.config_path = cmd_args.config # Store the actual config path used
+    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
+    args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
+
     return args
 
 # --- Data Preprocessing ---
@@ -641,14 +680,12 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
+    # Configuration loading and argument parsing are now handled within parse_args
     args = parse_args()
-    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
-    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
-    args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
-    args.checkpointing_steps = getattr(args, 'checkpointing_steps', 0) # Default disable periodic if using best
-    args.max_train_steps = getattr(args, 'max_train_steps', -1) # Default no max steps
-    args.seed = getattr(args, 'seed', 42)
-    # Add val_split default if not in config
-    args.val_split = getattr(args, 'val_split', 0.1) # Default 10% validation split
+    
+    # Defaults were already handled inside parse_args
+    # args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    # args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
+    # args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
 
     main(args)
