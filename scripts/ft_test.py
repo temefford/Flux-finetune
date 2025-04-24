@@ -30,13 +30,22 @@ from transformers import AutoTokenizer
 logger = get_logger(__name__, log_level="INFO")
 
 # --- Argument Parsing ---
-def parse_args(config_path):
-    with open(config_path, 'r') as f:
+def parse_args():
+    parser = argparse.ArgumentParser(description="Simple example of a FLUX training script.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/ft_config.yaml",
+        help="Path to the configuration YAML file relative to the project root.",
+    )
+    # Add arguments for data_dir and output_dir to potentially override config
+    args = parser.parse_args()
+    with open(args.config, 'r') as f:
         config = yaml.safe_load(f)
     # Simple conversion to Namespace for dot notation access
     args = argparse.Namespace(**config)
     # Resolve relative paths from config location
-    config_dir = Path(config_path).parent
+    config_dir = Path(args.config).parent
     args.output_dir = str(config_dir / args.output_dir)
     args.dataset_path = str(config_dir / args.dataset_path)
     return args
@@ -632,8 +641,7 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
-    config_path = '../configs/ft_config.yaml' # Relative path from script location
-    args = parse_args(config_path)
+    args = parse_args()
     args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
     args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
     args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
