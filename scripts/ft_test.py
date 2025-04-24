@@ -70,6 +70,18 @@ def parse_args():
         help="Type of dataset structure."
     )
     parser.add_argument(
+        "--image_column",
+        type=str,
+        default=None, # Default to None, relevant for metadata/hf types
+        help="Column name for image paths in metadata/HF datasets."
+    )
+    parser.add_argument(
+        "--caption_column",
+        type=str,
+        default=None, # Default to None, relevant for metadata/hf types
+        help="Column name for captions in metadata/HF datasets."
+    )
+    parser.add_argument(
         "--train_data_dir",
         type=str,
         default=None,
@@ -417,10 +429,11 @@ def main(args):
     )
 
     # --- Dataset Loading and Preprocessing ---
-    # Calculate absolute dataset path relative to the script's location
-    script_dir = os.path.dirname(__file__)
-    dataset_abs_path = os.path.abspath(os.path.join(script_dir, args.dataset_path))
-    metadata_file = os.path.join(dataset_abs_path, "metadata.json") # Use absolute path for metadata too
+    logger.info(f"Loading dataset. Type: {args.dataset_type}, Path: {args.train_data_dir}")
+
+    # Get the tokenizers
+
+    metadata_file = os.path.join(args.train_data_dir, "metadata.json") # Use absolute path for metadata too
     logger.info(f"Attempting to load dataset metadata from: {metadata_file}")
 
     if not os.path.exists(metadata_file):
@@ -469,7 +482,7 @@ def main(args):
         # Tokenize captions using the 'artwork' field
         captions = tokenize_captions(tokenizer, examples, text_column="artwork")
         # Preprocess images using the absolute path
-        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms)
+        processed_images = preprocess_train(examples, args.train_data_dir, image_transforms)
 
         # Combine results
         output = {
