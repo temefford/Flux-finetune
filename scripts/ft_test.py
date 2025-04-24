@@ -232,6 +232,11 @@ def main(args):
         vae.to(accelerator.device, dtype=weight_dtype)
         logger.info(f"VAE moved to device {accelerator.device} and cast to {weight_dtype}")
 
+        # >>> Extract Tokenizers <<< 
+        tokenizer = pipeline.tokenizer
+        tokenizer_2 = pipeline.tokenizer_2
+        logger.info("Tokenizers extracted.")
+
     except Exception as e:
         logger.error(f"Failed to load models or components: {e}")
         return
@@ -326,7 +331,8 @@ def main(args):
     # Define the preprocessing function with necessary arguments captured
     def preprocess_func(examples):
         # Tokenize captions using the 'artwork' field
-        captions = tokenize_captions((text_encoder, text_encoder_2), examples, text_column=args.caption_column) # Use caption_column from args
+        # Pass the actual tokenizers, not the text encoders
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
         # Preprocess images using the absolute path
         processed_images = preprocess_train(examples, dataset_abs_path, image_transforms, args.image_column)
 
