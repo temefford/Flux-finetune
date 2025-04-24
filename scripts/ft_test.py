@@ -59,12 +59,11 @@ def parse_args():
     args = argparse.Namespace(**config)
 
     # Apply command-line overrides (if provided)
+    # Logging will happen in main() after accelerator is initialized
     if cmd_args.data_dir:
         args.dataset_path = cmd_args.data_dir # Note: config key is dataset_path
-        logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
-        logger.info(f"Overriding output_dir with command-line value: {args.output_dir}")
 
     # --- Path Adjustments --- 
     # Make output_dir relative to the project root (where the script is run from)
@@ -164,6 +163,23 @@ def main(args):
         log_with="tensorboard", # or "wandb" if configured
         project_config=accelerator_project_config,
     )
+
+    # Log overrides now that accelerator is initialized
+    if hasattr(args, 'config_path'): # Check if config was successfully loaded
+        if args.config_path != 'configs/ft_config.yaml': # Log if not default
+             logger.info(f"Using configuration file: {args.config_path}", main_process_only=True)
+        # Check if paths were overridden (by comparing with originally loaded values if we stored them, or just checking if cmd_args existed - easier)
+        # Simplest: Check if the override args were passed (we need to get cmd_args again or pass them)
+        # Let's re-parse minimal args just for checking overrides
+        parser = argparse.ArgumentParser(add_help=False) # Don't add help again
+        parser.add_argument("--data_dir", type=str, default=None)
+        parser.add_argument("--output_dir", type=str, default=None)
+        cmd_override_args, _ = parser.parse_known_args() # Parse only known args
+
+        if cmd_override_args.data_dir:
+            logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}", main_process_only=True)
+        if cmd_override_args.output_dir:
+             logger.info(f"Overriding output_dir with command-line value: {args.output_dir}", main_process_only=True)
 
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
