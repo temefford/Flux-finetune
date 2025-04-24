@@ -17,10 +17,8 @@ from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
 from diffusers import FluxPipeline
-from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
-from peft import LoraConfig, PeftModel, get_peft_model_state_dict
-from peft.utils import LoraLoaderMixin
+from peft import LoraConfig, PeftModel
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
@@ -532,9 +530,16 @@ def main(args):
                     if accelerator.is_main_process:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
-                        # Save LoRA layers specifically
-                        transformer_lora_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(transformer))
-                        LoraLoaderMixin.save_lora_weights(save_path, transformer_lora_state_dict=transformer_lora_state_dict)
+                        # Save LoRA weights specifically if using PEFT library
+                        unwrapped_transformer = accelerator.unwrap_model(transformer)
+                        if isinstance(unwrapped_transformer, PeftModel):
+                            # Use the save_pretrained method from the PeftModel instance
+                            unwrapped_transformer.save_pretrained(save_path)
+                        else:
+                            # Fallback if not a PeftModel (shouldn't happen with LoRA but good practice)
+                            logger.warning("Attempting to save LoRA checkpoint, but model is not a PeftModel.")
+                            # Optionally save the full state dict if needed
+                            # torch.save(unwrapped_transformer.state_dict(), os.path.join(save_path, "pytorch_model.bin"))
                         logger.info(f"Saved state and LoRA weights to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -611,16 +616,15 @@ def main(args):
                     logger.info(f"Saving best model checkpoint to {best_checkpoint_dir} (Val Loss: {best_val_loss:.4f})...")
                     
                     unwrapped_transformer = accelerator.unwrap_model(transformer)
-                    # Save using appropriate method (PEFT LoRA or standard HF)
                     if isinstance(unwrapped_transformer, PeftModel):
-                         # Save LoRA weights specifically if using PEFT library
-                         unwrapped_transformer.save_pretrained(best_checkpoint_dir)
+                        # Save using appropriate method (PEFT LoRA or standard HF)
+                        unwrapped_transformer.save_pretrained(best_checkpoint_dir)
                     elif hasattr(unwrapped_transformer, 'save_pretrained'):
-                         # Standard Hugging Face save_pretrained for non-PEFT models or if LoRA is merged
-                         unwrapped_transformer.save_pretrained(best_checkpoint_dir)
+                        # Standard Hugging Face save_pretrained for non-PEFT models or if LoRA is merged
+                        unwrapped_transformer.save_pretrained(best_checkpoint_dir)
                     else:
-                         # Fallback or add specific logic if using a custom model structure
-                         torch.save(unwrapped_transformer.state_dict(), os.path.join(best_checkpoint_dir, "pytorch_model.bin"))
+                        # Fallback or add specific logic if using a custom model structure
+                        torch.save(unwrapped_transformer.state_dict(), os.path.join(best_checkpoint_dir, "pytorch_model.bin"))
                     logger.info(f"New best validation loss: {best_val_loss:.4f}. Saved checkpoint to {best_checkpoint_dir}")
             # Set model back to train mode after validation
             transformer.train()
@@ -673,17 +677,16 @@ def main(args):
     # --- Save the Final Model ---
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        transformer_final = accelerator.unwrap_model(transformer)
-        transformer_lora_state_dict = get_peft_model_state_dict(transformer_final)
-        LoraLoaderMixin.save_lora_weights(
-            args.output_dir,
-            transformer_lora_state_dict=transformer_lora_state_dict
-        )
-        logger.info(f"Saved final LoRA weights to {args.output_dir}")
-
-        # Save config file
-        with open(os.path.join(args.output_dir, 'final_config.yaml'), 'w') as f:
-            yaml.dump(vars(args), f)
+        final_model = accelerator.unwrap_model(transformer)
+        if isinstance(final_model, PeftModel):
+            final_model.save_pretrained(args.output_dir)
+        else:
+            logger.warning("Final model is not a PeftModel, attempting standard save_pretrained.")
+            if hasattr(final_model, 'save_pretrained'):
+                 final_model.save_pretrained(args.output_dir)
+            else:
+                 torch.save(final_model.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
+        logger.info(f"Saved final LoRA weights (or full model) to {args.output_dir}")
 
     accelerator.end_training()
     end_time = time.time()
