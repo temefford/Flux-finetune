@@ -318,22 +318,72 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
         "attention_mask_2": attention_mask_2,
     }
 
-def preprocess_train(examples, dataset_abs_path, image_transforms):
-    """Preprocesses a batch of training examples."""
-    try:
-        # Construct absolute path for images
-        images = [Image.open(os.path.join(dataset_abs_path, fn)).convert("RGB") for fn in examples["file_name"]]
-        examples["pixel_values"] = [image_transforms(image) for image in images]
-    except FileNotFoundError as e:
-        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
-        # Decide how to handle: skip batch, raise error, etc.
-        # For now, let's add a placeholder or skip - adding None might cause issues later
-        # Safest might be to ensure paths are correct before this step.
-        # Re-raising for now to make the error visible.
-        raise e
-    except Exception as e:
-        logger.error(f"Error during image preprocessing: {e}")
-        raise e
+def preprocess_func(examples):
+    # Handle image loading based on dataset type
+    if args.dataset_type == "imagefolder":
+        # Assumes 'image' column from imagefolder loader contains PIL Images
+        images = [img.convert("RGB") for img in examples['image']]
+    elif args.dataset_type == "hf_metadata":
+        # Construct full path if image_column contains relative paths
+        image_paths = [os.path.join(args.train_data_dir, img_path) for img_path in examples[args.image_column]]
+        try:
+            images = [Image.open(p).convert("RGB") for p in image_paths]
+        except FileNotFoundError as e:
+            logger.error(f"Image file not found: {e}. Check paths in metadata relative to {args.train_data_dir}")
+            raise e
+    elif args.dataset_type == "hf_dataset":
+        # Adapt based on the specific HF dataset's image column name/format
+        if args.image_column not in examples:
+            raise ValueError(f"Expected image column '{args.image_column}' not found in HF dataset batch.")
+        img_data = examples[args.image_column]
+        images = []
+        for item in img_data:
+            if isinstance(item, str): # Path
+                try:
+                    images.append(Image.open(item).convert("RGB"))
+                except FileNotFoundError as e:
+                    logger.error(f"Image file not found: {e}. Check paths in HF dataset.")
+                    raise e
+            elif isinstance(item, Image.Image): # PIL Image
+                images.append(item.convert("RGB"))
+            else:
+                raise TypeError(f"Unsupported image data type in HF dataset: {type(item)}")
+    else:
+        raise ValueError(f"Preprocessing not implemented for dataset_type: {args.dataset_type}")
+
+    examples["pixel_values"] = [image_transforms(image) for image in images]
+
+    # Handle captions based on dataset type
+    use_captions = False
+    if args.dataset_type != "imagefolder":
+        # Only attempt to use captions if NOT imagefolder
+        if args.caption_column and args.caption_column in examples:
+            use_captions = True
+        else:
+            logger.warning(
+                f"Caption column '{args.caption_column}' not specified or not found in '{args.dataset_type}' dataset. "
+                f"Generating dummy captions."
+            )
+    # else: dataset_type is imagefolder, always generate dummy captions
+
+    if use_captions:
+        tokenized_captions = tokenize_captions(tokenizer, examples, text_column=args.caption_column)
+        examples["input_ids"] = tokenized_captions["input_ids"]
+        examples["attention_mask"] = tokenized_captions["attention_mask"]
+        examples["input_ids_2"] = tokenized_captions["input_ids_2"]
+        examples["attention_mask_2"] = tokenized_captions["attention_mask_2"]
+    else:
+        # Generate dummy/empty captions
+        num_examples = len(images)
+        # Using numpy return format initially as it might be easier for simple cases
+        # Important: Needs to return PyTorch tensors eventually for the model
+        dummy_clip_tokens = tokenizer[0]([""] * num_examples, max_length=tokenizer[0].model_max_length, padding="max_length", truncation=True, return_tensors="np")
+        dummy_t5_tokens = tokenizer[1]([""] * num_examples, max_length=tokenizer[1].model_max_length, padding="max_length", truncation=True, return_tensors="np")
+        examples["input_ids"] = dummy_clip_tokens["input_ids"]
+        examples["attention_mask"] = dummy_clip_tokens["attention_mask"]
+        examples["input_ids_2"] = dummy_t5_tokens["input_ids"]
+        examples["attention_mask_2"] = dummy_t5_tokens["attention_mask_2"]
+
     return examples
 
 # --- Main Function ---
@@ -452,20 +502,18 @@ def main(args):
         return
 
     # --- Split Dataset --- #
-    if args.val_split > 0.0:
-        if not (0 < args.val_split < 1):
-            raise ValueError("val_split must be between 0 and 1 (exclusive)")
+    if args.val_split is not None and 0 < args.val_split < 1:
         logger.info(f"Splitting dataset with validation split: {args.val_split}")
-        # Use the datasets library's built-in splitting method
+        # Ensure dataset object exists before splitting
+        if 'dataset' not in locals():
+            raise RuntimeError("Dataset object was not loaded correctly before attempting split.")
         split_dataset = dataset.train_test_split(test_size=args.val_split, seed=args.seed)
         train_dataset = split_dataset["train"]
-        val_dataset = split_dataset["test"]
-        logger.info(f"  Training samples: {len(train_dataset)}")
-        logger.info(f"  Validation samples: {len(val_dataset)}")
+        eval_dataset = split_dataset["test"]
     else:
+        logger.info("Using full dataset for training, no validation split.")
         train_dataset = dataset
-        val_dataset = None
-        logger.info(f"Using full dataset for training: {len(train_dataset)} samples.")
+        eval_dataset = None
 
     # Define image transformations
     image_transforms = transforms.Compose(
@@ -477,35 +525,15 @@ def main(args):
         ]
     )
 
-    # Define the preprocessing function with necessary arguments captured
-    def preprocess_func(examples):
-        # Tokenize captions using the 'artwork' field
-        captions = tokenize_captions(tokenizer, examples, text_column="artwork")
-        # Preprocess images using the absolute path
-        processed_images = preprocess_train(examples, args.train_data_dir, image_transforms)
+    # Set the transform for on-the-fly preprocessing using the correct function
+    logger.info("Setting transform for training data...")
+    train_dataset.set_transform(preprocess_func) # Use the renamed function
+    if eval_dataset:
+        logger.info("Setting transform for validation data...")
+        eval_dataset.set_transform(preprocess_func) # Use the renamed function
 
-        # Combine results
-        output = {
-            "pixel_values": processed_images["pixel_values"],
-            "input_ids": captions["input_ids"],
-            "attention_mask": captions["attention_mask"],
-        }
-        # Add text_encoder_2 inputs if they exist
-        if 'input_ids_2' in captions:
-             output['input_ids_2'] = captions['input_ids_2']
-             output['attention_mask_2'] = captions['attention_mask_2']
-        return output
-
-    with accelerator.main_process_first():
-        # Apply preprocessing to train dataset
-        logger.info("Preprocessing training data...")
-        train_dataset = train_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=train_dataset.column_names)
-        # Apply preprocessing to val dataset if it exists
-        if val_dataset:
-            logger.info("Preprocessing validation data...")
-            val_dataset = val_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=val_dataset.column_names)
-
-    # Collate function
+    # --- Data Loaders ---
+    # Define collation function (needed if set_transform doesn't handle batching correctly)
     def collate_fn(examples):
         pixel_values = torch.stack([torch.tensor(example["pixel_values"]) for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
@@ -536,12 +564,12 @@ def main(args):
         num_workers=args.dataloader_num_workers, # Use arg for num_workers
     )
 
-    # Create validation dataloader if val_dataset exists
+    # Create validation dataloader if eval_dataset exists
     val_dataloader = None
-    if val_dataset:
+    if eval_dataset:
         logger.info("Creating validation dataloader...")
         val_dataloader = torch.utils.data.DataLoader(
-            val_dataset,
+            eval_dataset,
             shuffle=False, # No need to shuffle validation data
             collate_fn=collate_fn,
             batch_size=args.validation_batch_size, # Use specific validation batch size from args
@@ -588,8 +616,8 @@ def main(args):
 
     logger.info("***** Running training *****")
     logger.info(f"  Num training examples = {len(train_dataset)}")
-    if val_dataset: # Check if val_dataset was created before logging its length
-        logger.info(f"  Num validation examples = {len(val_dataset)}")
+    if eval_dataset: # Check if eval_dataset was created before logging its length
+        logger.info(f"  Num validation examples = {len(eval_dataset)}")
     logger.info(f"  Num Epochs = {args.epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
