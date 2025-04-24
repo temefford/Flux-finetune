@@ -557,7 +557,6 @@ def main(args):
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
                     pooled_projections=pooled_prompt_embeds_2.to(accelerator.device), # T5 pooled embeds
-                    text_embeds=pooled_prompt_embeds_2.to(accelerator.device) # Also T5 pooled embeds
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -677,7 +676,6 @@ def main(args):
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
                         pooled_projections=pooled_prompt_embeds_2.to(accelerator.device),
-                        text_embeds=pooled_prompt_embeds_2.to(accelerator.device)
                     ).sample
 
                     # Assume target is noise for validation loss calculation
