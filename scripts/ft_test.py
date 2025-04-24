@@ -11,7 +11,6 @@ import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
 import transformers
-import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
@@ -22,6 +21,8 @@ from peft import LoraConfig, PeftModel
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
+from transformers import PretrainedConfig
+import transformers
 from transformers import AutoTokenizer
 
 logger = get_logger(__name__, log_level="INFO")
@@ -218,7 +219,7 @@ def main(args):
         # FLUX uses a specific pipeline structure
         logger.info("Loading base model pipeline...")
         pipeline = FluxPipeline.from_pretrained(
-            args.pretrained_model_name_or_path,
+            args.model_id, # Use model_id from config
             revision=args.revision,
             torch_dtype=weight_dtype, # Use weight_dtype here during initial load
         )
