@@ -528,6 +528,11 @@ def main(args):
                     latents = latents.to(accelerator.device) # Ensure projected latents are on device
                     logger.debug(f"Projected latents shape: {latents.shape}")
                     
+                # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
+                bsz, channels, height, width = latents.shape
+                latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
+                logger.info(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
+
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
                     prompt_embeds_outputs = text_encoder(
@@ -552,14 +557,14 @@ def main(args):
                 timesteps = timesteps.long()
 
                 # Log shapes before transformer call
-                logger.info(f"Shape BEFORE transformer call - latents: {latents.shape}")
+                logger.debug(f"Shape BEFORE transformer call - latents: {latents.shape}")
                 logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
                 logger.info(f"Shape BEFORE transformer call - prompt_embeds (CLIP): {prompt_embeds.shape}")
                 logger.info(f"Shape BEFORE transformer call - pooled_prompt_embeds_2 (T5): {pooled_prompt_embeds_2.shape}")
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
-                    hidden_states=latents.to(accelerator.device), # Explicitly move latents
+                    hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds.to(accelerator.device), # CLIP embeds
                     pooled_projections=pooled_prompt_embeds_2.to(accelerator.device), # T5 pooled embeds
@@ -654,6 +659,11 @@ def main(args):
                         latents = latents.to(accelerator.device) # Ensure projected latents are on device
                         logger.debug(f"Validation: Projected latents shape: {latents.shape}")
                         
+                    # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
+                    bsz_val, channels_val, height_val, width_val = latents.shape
+                    latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
+                    logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
+
                     # Encode prompts for validation batch
                     with torch.no_grad():
                         # CLIP Embeddings
@@ -678,7 +688,7 @@ def main(args):
 
                     # Predict noise using the model
                     model_pred = transformer(
-                        hidden_states=latents.to(accelerator.device),
+                        hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds.to(accelerator.device),
                         pooled_projections=pooled_prompt_embeds_2.to(accelerator.device),
