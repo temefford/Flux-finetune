@@ -312,7 +312,7 @@ def main(args):
     # Define the preprocessing function with necessary arguments captured
     def preprocess_func(examples):
         # Tokenize captions using the 'artwork' field
-        captions = tokenize_captions(tokenizer, examples, text_column="artwork")
+        captions = tokenize_captions(tokenizer, examples, text_column=args.text_column)
         # Preprocess images using the absolute path
         processed_images = preprocess_train(examples, dataset_abs_path, image_transforms)
 
