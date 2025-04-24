@@ -204,26 +204,55 @@ def parse_args():
 
     args = parser.parse_args()
 
-    # Load from config file if --config is provided
+    config_values = {}
     if args.config:
         config = load_config(args.config)
-        # Update args with config values, command line takes precedence
-        for key, value in config.items():
-            if getattr(args, key, None) is None: # Only set if not provided via command line
-                # Handle special cases like lists if necessary
-                if key == 'lora_target_modules' and isinstance(value, list):
-                    setattr(args, key, value)
-                elif key == 'validation_prompts' and isinstance(value, list):
-                    setattr(args, key, value)
-                elif hasattr(args, key): # Check if arg exists
-                    setattr(args, key, value)
-                else:
-                    logging.warning(f"Config key '{key}' not found in ArgumentParser, skipping.") # Use standard logging explicitly before accelerate is ready
-    # Set train_data_dir from data_dir if data_dir is given and train_data_dir isn't
-    # Command-line --train_data_dir takes precedence over config, which takes precedence over --data_dir
-    if args.train_data_dir is None and args.data_dir:
-         logging.info(f"Using --data_dir '{args.data_dir}' as train_data_dir.")
-         args.train_data_dir = args.data_dir
+        config_values = config # Store config values separately
+
+    # Update args: CLI args override config values
+    for key, value in config_values.items():
+        # Check if the argument was NOT provided via command line
+        if getattr(args, key, None) is None:
+            # Check if the argument actually exists in the parser
+            if hasattr(args, key):
+                setattr(args, key, value)
+            else:
+                # Don't warn for commented-out keys like dataset_path if they aren't in parser
+                # But do warn for keys explicitly defined in the parser but missing in config logic
+                if key in parser._option_string_actions:
+                    logging.warning(f"Config key '{key}' is defined in config but might not be handled correctly or is unused.")
+                # else: # Key not in parser, likely commented out or typo - ignore silently
+                #    pass 
+
+    # Determine the final train_data_dir based on precedence:
+    # 1. CLI --train_data_dir
+    # 2. CLI --data_dir
+    # 3. Config 'train_data_dir'
+    # 4. Config 'dataset_path' (legacy/fallback)
+    final_train_data_dir = None
+    if args.train_data_dir: # CLI --train_data_dir has highest priority
+        final_train_data_dir = args.train_data_dir
+        logging.info(f"Using --train_data_dir from CLI: {final_train_data_dir}")
+    elif args.data_dir: # CLI --data_dir is next
+        final_train_data_dir = args.data_dir
+        logging.info(f"Using --data_dir from CLI as train_data_dir: {final_train_data_dir}")
+    elif 'train_data_dir' in config_values and config_values['train_data_dir'] is not None:
+        final_train_data_dir = config_values['train_data_dir']
+        logging.info(f"Using 'train_data_dir' from config: {final_train_data_dir}")
+    elif 'dataset_path' in config_values and config_values['dataset_path'] is not None: # Check legacy config key
+        # Check if dataset_path was actually commented out by checking its value type
+        # This is imperfect, relies on YAML comments not being loaded as strings
+        if isinstance(config_values.get('dataset_path'), str):
+            final_train_data_dir = config_values['dataset_path']
+            logging.warning(f"Using legacy 'dataset_path' from config as train_data_dir: {final_train_data_dir}. Consider using 'train_data_dir' instead.")
+
+    # Assign the determined path back to args.train_data_dir
+    args.train_data_dir = final_train_data_dir
+
+    # Check if a data directory was actually determined
+    if args.train_data_dir is None:
+        # Maybe raise error or default depending on whether it's required
+        logging.warning("No training data directory specified via --train_data_dir, --data_dir, or config file.")
 
     env_local_rank = int(os.environ.get("LOCAL_RANK", -1))
     if env_local_rank != -1 and env_local_rank != args.local_rank:
