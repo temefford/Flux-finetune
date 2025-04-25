@@ -113,16 +113,19 @@ def parse_args():
 
 # --- Data Preprocessing Helper Functions ---
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2):
+    logger.info(f"[preprocess_train] dataset_abs_path: {dataset_abs_path}")
     """Preprocesses a batch of examples for training."""
     # Determine image paths and handle potential hash column presence
     # Image files are expected directly in dataset_abs_path, alongside metadata
     if hash_column and hash_column in examples:
         # Construct path using dataset_abs_path directly
         image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[hash_column]]
+        logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
     elif image_column in examples:
         # Assuming image_column contains filenames like 'image_001.jpg'
         # Construct path using dataset_abs_path directly
         image_paths = [os.path.join(dataset_abs_path, fn) if '.' in fn else os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[image_column]]
+        logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
     else:
         logger.error(f"Missing required image identifier column ('{image_column}' or '{hash_column}') in examples.")
         return {"pixel_values": [None] * len(examples.get(list(examples.keys())[0], [])), "input_ids_2": [None] * len(examples.get(list(examples.keys())[0], []))}
