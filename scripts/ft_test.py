@@ -223,57 +223,6 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
             "input_ids_2": [None] * batch_size,
         }
 
-# --- Preprocessing Function --- #
-def preprocess_func(examples, **fn_kwargs):
-    # Extract necessary variables passed via fn_kwargs
-    image_transforms = fn_kwargs.get("image_transforms")
-    tokenizer = fn_kwargs.get("tokenizer")
-    tokenizer_2 = fn_kwargs.get("tokenizer_2")
-    args = fn_kwargs.get("args")
-
-    if not all([image_transforms, tokenizer, tokenizer_2, args]):
-        raise ValueError("Missing required kwargs in preprocess_func (image_transforms, tokenizer, tokenizer_2, args)")
-
-    # 1. Load and Transform Images
-    # For 'imagefolder', the 'image' column contains PIL Image objects
-    # For 'hf_metadata', it might contain paths or bytes - adjust loading if needed
-    try:
-        # Load images
-        images = [image.convert("RGB") for image in examples[args.image_column]]
-
-        # Apply transforms - result is a list of tensors
-        pixel_values_list = [image_transforms(image)[0] for image in images]
-
-        # Tokenize captions
-        captions = list(examples[args.caption_column])
-        captions = [str(c) if c is not None else "" for c in captions]
-        # tokenize_captions returns a tensor [batch, seq_len]
-        text_inputs_2_tensor = tokenize_captions(captions, tokenizer_2)
-
-        # Return a dictionary where values are lists matching the batch size
-        return {
-            "pixel_values": pixel_values_list,
-            "input_ids_2": text_inputs_2_tensor.tolist() # Convert tensor to list of lists
-        }
-
-    except FileNotFoundError as e:
-        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
-        # Return empty structure or raise, depending on desired robustness
-        # Returning structure matching keys might prevent some errors downstream
-        batch_size = len(examples[args.image_column]) # Determine batch size from input
-        return {
-            "pixel_values": [None] * batch_size,
-            "input_ids_2": [None] * batch_size,
-        }
-    except Exception as e:
-        logger.error(f"Error during image preprocessing: {e}")
-        # Similar error handling as above
-        batch_size = len(examples[args.image_column])
-        return {
-            "pixel_values": [None] * batch_size,
-            "input_ids_2": [None] * batch_size,
-        }
-
 # --- Main Function ---
 def main(args):
     # Initialize Accelerator
