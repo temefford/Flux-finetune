@@ -746,30 +746,39 @@ def main(args):
                     prompt_embeds_2 = torch.zeros(bsz, 1, cross_attention_dim, dtype=weight_dtype, device=accelerator.device)
                     logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2.shape}")
 
-                # For image-only, pass None for input_ids_2 (txt_ids)
-                if input_ids_2 is None:
-                    input_ids_2 = None
-                    logger.warning("input_ids_2 was None, passing None for image-only batch.")
+                # Store original input_ids_2 state for conditional logic
+                original_input_ids_2_is_none = input_ids_2 is None
+
+                # Build transformer arguments conditionally
+                transformer_kwargs = {
+                    'hidden_states': latents_reshaped,
+                    'encoder_hidden_states': prompt_embeds_2, # Placeholder is created above if needed
+                    'pooled_projections': clip_pooled,       # Placeholder is created above if needed
+                    'img_ids': img_ids,
+                    # We will conditionally add 'txt_ids' below
+                }
+
+                if not original_input_ids_2_is_none:
+                    # Only add txt_ids if it was present in the batch
+                    transformer_kwargs['txt_ids'] = input_ids_2
+                    logger.debug(f"  Passing txt_ids with shape: {input_ids_2.shape}")
+                else:
+                    logger.debug("  Skipping txt_ids argument for image-only batch.")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
-                logger.debug(f"  transformer input shape - latents_reshaped: {latents_reshaped.shape}")
-                logger.debug(f"  transformer input shape - timestep: {timesteps.shape}")
-                logger.debug(f"  transformer input type - encoder_hidden_states: {type(prompt_embeds_2)}")
-                logger.debug(f"  transformer input shape - encoder_hidden_states: {prompt_embeds_2.shape if prompt_embeds_2 is not None else 'None'}")
-                logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled.shape}")
-                logger.debug(f"  transformer input type - txt_ids: {type(input_ids_2)}")
-                logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape if input_ids_2 is not None else 'None'}")
-                logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
+                logger.debug(f"  transformer input shape - hidden_states: {transformer_kwargs['hidden_states'].shape}")
+                logger.debug(f"  transformer input shape - encoder_hidden_states: {transformer_kwargs['encoder_hidden_states'].shape}")
+                logger.debug(f"  transformer input shape - pooled_projections: {transformer_kwargs['pooled_projections'].shape}")
+                logger.debug(f"  transformer input shape - img_ids: {transformer_kwargs['img_ids'].shape}")
+                # Log txt_ids shape only if it exists in kwargs
+                if 'txt_ids' in transformer_kwargs:
+                     logger.debug(f"  transformer input shape - txt_ids: {transformer_kwargs['txt_ids'].shape}")
+                else:
+                     logger.debug(f"  transformer input shape - txt_ids: None (skipped)")
 
-                model_pred = transformer(
-                    hidden_states=latents_reshaped,
-                    timestep=timesteps,
-                    encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
-                    pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
-                    txt_ids=input_ids_2, # T5 IDs (None for img-only)
-                    img_ids=img_ids,     # Pass generated 1D img_ids
-                ).sample
+
+                model_pred = transformer(**transformer_kwargs)
 
                 # Assume prediction target is the noise (epsilon prediction)
                 target = noise
