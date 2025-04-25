@@ -130,6 +130,9 @@ def parse_args():
         args.validation_split = 0.0 # Default to 0 if not in config or cmd line
         print("WARNING: validation_split not found in config or command line, defaulting to 0.0") # Use print
 
+    print("--- Final Arguments before return ---")
+    print(vars(args))
+    print("-------------------------------------")
     return args
 
 # --- New Transform Function for set_transform --- #
