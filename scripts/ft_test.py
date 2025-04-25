@@ -117,9 +117,10 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     """Preprocesses a batch of examples for training."""
     # Determine image paths and handle potential hash column presence
     # Image files are expected directly in dataset_abs_path, alongside metadata
+    # Build a *correct* image root once and reuse it
+    image_root = os.path.join(dataset_abs_path, "imgs")  # <-- ADAPT if your folder is different
     if hash_column and hash_column in examples:
-        # Construct path using dataset_abs_path directly
-        image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[hash_column]]
+        image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[hash_column]]
         logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
     elif image_column in examples:
         # Assuming image_column contains filenames like 'image_001.jpg'
@@ -267,14 +268,14 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu()
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu()
+            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu().tolist()
+            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu().tolist()
             valid_item_idx += 1
 
         # --- Return Lists for Dataset Map --- #
-        return {
-            "pixel_values": pixel_values_list, # List of Tensors/Nones [original_batch_size]
-            "input_ids_2": input_ids_list,   # List of Tensors/Nones [original_batch_size]
+        return {                   # HF datasets will happily keep lists
+            "pixel_values": pixel_values_list,
+            "input_ids_2": input_ids_list,
         }
 
     except Exception as e:
@@ -593,9 +594,10 @@ def main(args):
 
     # --- Filter out invalid examples after preprocessing --- #
     def is_valid(example):
-        valid = example["pixel_values"] is not None and example["input_ids_2"] is not None
+        # keep rows that at least have images; dummy IDs are created later
+        valid = example["pixel_values"] is not None
         if not valid:
-            logger.warning(f"Filtered out example: pixel_values={type(example['pixel_values'])}, input_ids_2={type(example['input_ids_2'])}")
+            logger.warning(f"Filtered out example: pixel_values={type(example['pixel_values'])}, input_ids_2={type(example.get('input_ids_2', None))}")
         return valid
 
     before_count = len(processed_dataset)
@@ -631,13 +633,11 @@ def main(args):
     def collate_fn(examples):
         """Collates preprocessed examples into batches, filtering out invalid entries."""
         # Filter out entries where pixel_values is None (indicating a preprocessing failure for that example)
-        valid_examples = [ex for ex in examples if ex["pixel_values"] is not None and ex["input_ids_2"] is not None]
+        valid_examples = [ex for ex in examples if ex["pixel_values"] is not None]
 
         if not valid_examples:
             logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
-            # Yield an empty list to let DataLoader drop the batch (PyTorch 2.3+ safe)
-            return []
-
+            return None         # tells DataLoader to drop the batch (PyTorch >=2.1)
 
         try:
             def to_tensor_and_squeeze(pv):
