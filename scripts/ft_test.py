@@ -132,25 +132,8 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         # Load images
         images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
 
-        # --- Add logging for image_transforms output ---
-        if images:
-            first_image_transformed = image_transforms(images[0])
-            logger.info(f"preprocess_train: Type of transformed first image: {type(first_image_transformed)}")
-            if isinstance(first_image_transformed, torch.Tensor):
-                logger.info(f"  Shape: {first_image_transformed.shape}")
-            elif isinstance(first_image_transformed, (list, tuple)):
-                logger.info(f"  Length: {len(first_image_transformed)}")
-                if first_image_transformed:
-                    logger.info(f"  Type of first element: {type(first_image_transformed[0])}")
-                    if isinstance(first_image_transformed[0], torch.Tensor):
-                        logger.info(f"    Shape: {first_image_transformed[0].shape}")
-            else:
-                logger.info(f"  Value: {first_image_transformed}")
-        # --- End logging ---
-
         # Apply transforms - result is a list of tensors
-        # Assume image_transforms returns [tensor], extract the tensor
-        pixel_values_list = [image_transforms(image)[0] for image in images]
+        pixel_values_list = [image_transforms(image) for image in images]
 
         # Tokenize captions
         captions = list(examples[caption_column])
@@ -200,25 +183,8 @@ def preprocess_func(examples, **fn_kwargs):
         # Load images
         images = [image.convert("RGB") for image in examples[args.image_column]]
 
-        # --- Add logging for image_transforms output ---
-        if images:
-            first_image_transformed = image_transforms(images[0])
-            logger.info(f"preprocess_train: Type of transformed first image: {type(first_image_transformed)}")
-            if isinstance(first_image_transformed, torch.Tensor):
-                logger.info(f"  Shape: {first_image_transformed.shape}")
-            elif isinstance(first_image_transformed, (list, tuple)):
-                logger.info(f"  Length: {len(first_image_transformed)}")
-                if first_image_transformed:
-                    logger.info(f"  Type of first element: {type(first_image_transformed[0])}")
-                    if isinstance(first_image_transformed[0], torch.Tensor):
-                        logger.info(f"    Shape: {first_image_transformed[0].shape}")
-            else:
-                logger.info(f"  Value: {first_image_transformed}")
-        # --- End logging ---
-
         # Apply transforms - result is a list of tensors
-        # Assume image_transforms returns [tensor], extract the tensor
-        pixel_values_list = [image_transforms(image)[0] for image in images]
+        pixel_values_list = [image_transforms(image) for image in images]
 
         # Tokenize captions
         captions = list(examples[args.caption_column])
@@ -507,45 +473,10 @@ def main(args):
 
     # Collate function
     def collate_fn(examples):
-        # --- Add logging here ---
-        logger.info(f"Collate fn received {len(examples)} examples.")
-        if examples:
-            first_example_pv = examples[0].get("pixel_values") # Use .get for safety
-            first_example_ids2 = examples[0].get("input_ids_2")
-            logger.info(f"First example keys: {list(examples[0].keys())}")
-            logger.info(f"Type of first example pixel_values: {type(first_example_pv)}")
-            if isinstance(first_example_pv, list):
-                 logger.info(f"  Length of list: {len(first_example_pv)}")
-                 if first_example_pv:
-                     logger.info(f"  Type of first element in list: {type(first_example_pv[0])}")
-            elif isinstance(first_example_pv, torch.Tensor):
-                 logger.info(f"  Tensor shape: {first_example_pv.shape}")
-            else:
-                 logger.info(f"  Value: {first_example_pv}")
-            # Log input_ids_2 as well for confirmation
-            logger.info(f"Type of first example input_ids_2: {type(first_example_ids2)}")
-            if isinstance(first_example_ids2, list):
-                logger.info(f"  Length of list: {len(first_example_ids2)}")
-            else:
-                logger.info(f"  Value: {first_example_ids2}")
-        # --- End logging ---
-
-        try:
-            # Ensure pixel_values are correctly handled
-            pixel_values = torch.stack([example["pixel_values"] for example in examples])
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-        except TypeError as e:
-            logger.error(f"TypeError during pixel_values stacking: {e}")
-            # Log details about the problematic example types
-            for i, example in enumerate(examples):
-                pv = example.get("pixel_values")
-                logger.error(f"Example {i} pixel_values type: {type(pv)}")
-                if isinstance(pv, list):
-                    logger.error(f"  Length: {len(pv)}")
-            raise e # Re-raise the error
-        except Exception as e:
-            logger.error(f"Unexpected error during pixel_values stacking: {e}")
-            raise e
+        # preprocess_train returns lists of tensors/lists
+        # We stack them here
+        pixel_values = torch.stack([example["pixel_values"] for example in examples])
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
         # Ensure input_ids_2 are correctly handled
         # preprocess_train returns a list of lists; convert each list back to a tensor
