@@ -721,6 +721,23 @@ def main(args):
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
                 timesteps = timesteps.long()
 
+                # Ensure pooled projections exist (create placeholder if needed) -- Moved here AGAIN to prevent logging error
+                if clip_pooled is None:
+                    # Get expected dimension from transformer config
+                    try:
+                        # Try to get the specific dim expected by the text embedder for pooled projections
+                        expected_clip_dim = transformer.config.pooled_projection_dim
+                        if expected_clip_dim is None:
+                            logger.warning("transformer.config.pooled_projection_dim is None, falling back to 768.")
+                            expected_clip_dim = 768 # Fallback (common in some FLUX variants)
+                    except AttributeError:
+                        logger.warning("Could not find transformer.config.pooled_projection_dim, falling back to 768.")
+                        expected_clip_dim = 768 # Fallback
+
+                    # Make sure 'bsz' is defined in this scope. It should be from the loop.
+                    clip_pooled = torch.zeros(bsz, expected_clip_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.warning(f"clip_pooled was None immediately before logging/transformer call, created placeholder with expected dim {expected_clip_dim}: {clip_pooled.shape}") 
+
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
                 logger.debug(f"  transformer input shape - latents_reshaped: {latents_reshaped.shape}")
