@@ -746,11 +746,10 @@ def main(args):
                     prompt_embeds_2 = torch.zeros(bsz, 1, cross_attention_dim, dtype=weight_dtype, device=accelerator.device)
                     logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2.shape}")
 
-                # Ensure input_ids_2 (txt_ids) is a tensor, even for image-only datasets
+                # For image-only, pass None for input_ids_2 (txt_ids)
                 if input_ids_2 is None:
-                    # For image-only, pass an empty long tensor of shape [bsz, 0]
-                    input_ids_2 = torch.zeros(bsz, 0, dtype=torch.long, device=accelerator.device)
-                    logger.warning(f"input_ids_2 was None, created EMPTY placeholder: {input_ids_2.shape}")
+                    input_ids_2 = None
+                    logger.warning("input_ids_2 was None, passing None for image-only batch.")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
