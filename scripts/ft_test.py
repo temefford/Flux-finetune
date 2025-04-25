@@ -118,7 +118,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     # Determine image paths and handle potential hash column presence
     # Image files are expected directly in dataset_abs_path, alongside metadata
     # Build a *correct* image root once and reuse it
-    image_root = os.path.join(dataset_abs_path, "imgs")  # <-- ADAPT if your folder is different
+    image_root = dataset_abs_path  # <-- ADAPT if your folder is different
     if hash_column and hash_column in examples:
         image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[hash_column]]
         logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
@@ -268,8 +268,8 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu().tolist()
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu().tolist()
+            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu()
+            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu()
             valid_item_idx += 1
 
         # --- Return Lists for Dataset Map --- #
@@ -594,10 +594,11 @@ def main(args):
 
     # --- Filter out invalid examples after preprocessing --- #
     def is_valid(example):
-        # keep rows that at least have images; dummy IDs are created later
-        valid = example["pixel_values"] is not None
+        # Only keep rows with non-empty image tensors
+        pv = example["pixel_values"]
+        valid = pv is not None and hasattr(pv, 'shape') and pv.shape[0] > 0
         if not valid:
-            logger.warning(f"Filtered out example: pixel_values={type(example['pixel_values'])}, input_ids_2={type(example.get('input_ids_2', None))}")
+            logger.warning(f"Filtered out example: pixel_values={type(pv)}, shape={getattr(pv, 'shape', None)}, input_ids_2={type(example.get('input_ids_2', None))}")
         return valid
 
     before_count = len(processed_dataset)
