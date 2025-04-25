@@ -15,10 +15,12 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-from diffusers import FluxPipeline
+
+from diffusers import FluxPipeline, DDPMScheduler
 from diffusers.optimization import get_scheduler
 from peft import LoraConfig, PeftModel
 from PIL import Image
+# Removed unused Dataset import
 from torchvision import transforms
 from tqdm.auto import tqdm
 
@@ -301,7 +303,14 @@ def main(args):
         logger.info("Pipeline loaded.")
 
         # Extract components
-        noise_scheduler = pipeline.scheduler
+        original_scheduler_config = pipeline.scheduler.config
+        noise_scheduler = DDPMScheduler(
+            num_train_timesteps=original_scheduler_config.get("num_train_timesteps", 1000), 
+            beta_schedule=original_scheduler_config.get("beta_schedule", "scaled_linear"),
+            prediction_type=original_scheduler_config.get("prediction_type", "epsilon") # Common default for training
+        )
+        logger.info(f"Initialized training noise scheduler: {noise_scheduler.__class__.__name__}")
+        
         vae = pipeline.vae
         text_encoder = pipeline.text_encoder
         text_encoder_2 = pipeline.text_encoder_2
