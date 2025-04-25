@@ -638,29 +638,12 @@ def main(args):
 
         if not valid_examples:
             logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
-            return None         # tells DataLoader to drop the batch (PyTorch >=2.1)
+            return []  # PyTorch >=2.1 skips batch if empty list; for <2.1, consider raising RuntimeError
 
         try:
-            def to_tensor_and_squeeze(pv):
-                if isinstance(pv, list):
-                    pv = torch.tensor(pv, dtype=torch.float32)
-                if isinstance(pv, torch.Tensor) and pv.ndim == 4 and pv.shape[0] == 1:
-                    pv = pv.squeeze(0)
-                return pv
-
-            def to_tensor_long(ids):
-                if isinstance(ids, list):
-                    ids = torch.tensor(ids, dtype=torch.long)
-                return ids
-
-            pixel_values = torch.stack([to_tensor_and_squeeze(ex["pixel_values"]) for ex in valid_examples])
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-            input_ids_2 = torch.stack([to_tensor_long(ex["input_ids_2"]) for ex in valid_examples])
-
             batch = {
-                "pixel_values": pixel_values,
-                "input_ids_2": input_ids_2,
+                "pixel_values": torch.stack([torch.as_tensor(ex["pixel_values"]) for ex in valid_examples]),
+                "input_ids_2": torch.stack([torch.as_tensor(ex["input_ids_2"]) for ex in valid_examples]),
             }
             return batch
         except Exception as e:
@@ -704,6 +687,22 @@ def main(args):
             num_workers=args.dataloader_num_workers,
         )
 
+    # --- Prepare with Accelerator ---
+    # Prepare relevant items (handle val_dataloader conditionally)
+    logger.info("Preparing models and dataloaders with Accelerator...")
+    if val_dataloader:
+        transformer, optimizer, train_dataloader, val_dataloader = accelerator.prepare(
+            transformer, optimizer, train_dataloader, val_dataloader
+        )
+    else:
+        transformer, optimizer, train_dataloader = accelerator.prepare(
+            transformer, optimizer, train_dataloader
+        )
+
+    # Move text_encoder to device
+    text_encoder.to(accelerator.device)
+    text_encoder_2.to(accelerator.device)
+
     # --- Calculate Training Steps --- 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
     if args.max_train_steps is not None and args.max_train_steps > 0:
@@ -721,32 +720,6 @@ def main(args):
         num_warmup_steps=50, # Example warmup steps
         num_training_steps=max_train_steps,
     )
-
-    # --- Prepare with Accelerator ---
-    # Prepare relevant items (handle val_dataloader conditionally)
-    logger.info("Preparing models and dataloaders with Accelerator...")
-    if val_dataloader:
-        transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader = accelerator.prepare(
-            transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader
-        )
-    else:
-        transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            transformer, optimizer, train_dataloader, lr_scheduler
-        )
-
-    # Move text_encoder to device
-    text_encoder.to(accelerator.device)
-    text_encoder_2.to(accelerator.device)
-
-    # --- Calculate Training Steps --- 
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is not None and args.max_train_steps > 0:
-        max_train_steps = args.max_train_steps
-        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch) # Recalculate epochs based on max_train_steps
-        logger.info(f"Training for a fixed {max_train_steps} steps, overriding epochs to {args.epochs}.")
-    else:
-        max_train_steps = args.epochs * num_update_steps_per_epoch
-        logger.info(f"Training for {args.epochs} epochs, corresponding to {max_train_steps} steps.")
 
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
