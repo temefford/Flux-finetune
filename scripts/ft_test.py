@@ -455,9 +455,14 @@ def main(args):
     )
 
     logger.info("Preprocessing training data...")
+    # Ensure dataset path is absolute for image loading
+    dataset_abs_path = os.path.abspath(args.dataset_path)
     preprocess_kwargs = {
         "image_transforms": image_transforms,
         "tokenizer_2": tokenizer_2,
+        "dataset_abs_path": dataset_abs_path,        # Added back
+        "image_column": args.image_column,           # Added back
+        "hash_column": args.image_column            # Added back (using image_column value based on config)
     }
     train_dataset = train_dataset.map(
         preprocess_train,
@@ -469,12 +474,17 @@ def main(args):
     # Apply preprocessing to val dataset if it exists
     if val_dataset:
         logger.info("Preprocessing validation data...")
+        # Ensure dataset path is absolute for image loading
+        dataset_abs_path_val = os.path.abspath(args.dataset_path) # Recalculate or reuse dataset_abs_path
         preprocess_kwargs_val = {
             "image_transforms": image_transforms,
             "tokenizer_2": tokenizer_2,
+            "dataset_abs_path": dataset_abs_path_val,   # Added back
+            "image_column": args.image_column,          # Added back
+            "hash_column": args.image_column           # Added back (using image_column value based on config)
         }
         val_dataset = val_dataset.map(
-            preprocess_train,
+            preprocess_train, # Use the same function
             batched=True,
             num_proc=1, # Changed from args.preprocessing_num_workers
             remove_columns=val_dataset.column_names,
