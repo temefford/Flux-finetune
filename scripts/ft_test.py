@@ -118,6 +118,9 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         images = [Image.open(path).convert("RGB") for path in image_paths]
 
         # --- Image Processing (Batched using image_processor.preprocess) ---
+        # Log the paths being processed in this batch for debugging
+        logger.info(f"Preprocessing batch with image paths: {image_paths}")
+
         # image_transforms is now pipeline.image_processor.preprocess
         # It expects a list of images and returns a dict with batch tensor/numpy array
         # VaeImageProcessor does not accept return_tensors="pt"
