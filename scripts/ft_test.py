@@ -107,121 +107,79 @@ def parse_args():
 
 # --- Data Preprocessing Helper Functions ---
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, caption_column, tokenizer_2):
-    """Preprocesses a batch of training examples."""
+    """Preprocesses a batch using batched processor/tokenizer calls, returning batch tensors."""
     image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[image_column]]
     batch_size = len(image_paths)
 
     try:
-        # --- Image Processing (Individual Application of Compose Transform) ---
-        pixel_values_list_of_tensors = []
-        for path in image_paths:
-            try:
-                image = Image.open(path).convert("RGB")
-                # Apply the torchvision Compose transform to the single PIL image
-                tensor = image_transforms(image) # Output is a tensor [C, H, W]
-                pixel_values_list_of_tensors.append(tensor)
-            except FileNotFoundError:
-                logger.warning(f"Image file not found during preprocessing, skipping: {path}")
-                pixel_values_list_of_tensors.append(None) # Add None placeholder
-            except Exception as img_err:
-                logger.warning(f"Error processing image {path} during preprocessing, skipping: {img_err}")
-                pixel_values_list_of_tensors.append(None) # Add None placeholder
+        # Load images into a list of PIL Images
+        images = [Image.open(path).convert("RGB") for path in image_paths]
+
+        # --- Image Processing (Batched using image_processor.preprocess) ---
+        # image_transforms is now pipeline.image_processor.preprocess
+        # It expects a list of images and returns a dict with batch tensor
+        image_inputs = image_transforms(images, return_tensors="pt")
+        pixel_values_batch_tensor = image_inputs['pixel_values'] # Tensor [B, C, H, W]
 
         # --- Text Processing (Batched) ---
         captions = [str(c) if c is not None else "" for c in examples[caption_column]]
-        max_len = getattr(tokenizer_2, 'model_max_length', 512) # Use tokenizer's max_length or default
+        max_len = getattr(tokenizer_2, 'model_max_length', 512)
         text_inputs = tokenizer_2(
-            captions,
-            padding="max_length",
-            max_length=max_len,
-            truncation=True,
-            return_tensors="pt" # Tokenizer expects this
+            captions, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
         )
         input_ids_2_batch_tensor = text_inputs['input_ids'] # Tensor [B, SeqLen]
-        # Convert text tensor to list of lists for map compatibility
-        input_ids_2_list_of_lists = input_ids_2_batch_tensor.tolist()
 
-        # --- Combine Results & Handle Nones ---
-        # Ensure output lists correspond correctly, propagating Nones
-        final_pixel_values = []
-        final_input_ids = []
-        if len(pixel_values_list_of_tensors) != batch_size or len(input_ids_2_list_of_lists) != batch_size:
-             logger.error(f"Internal batch size mismatch before combining: images={len(pixel_values_list_of_tensors)}, texts={len(input_ids_2_list_of_lists)}, expected={batch_size}")
-             # Return Nones for safety if intermediate processing failed unexpectedly
-             return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
+        # --- Sanity Check Batch Sizes ---
+        if pixel_values_batch_tensor.shape[0] != batch_size or input_ids_2_batch_tensor.shape[0] != batch_size:
+            logger.error(f"Batch size mismatch after processing in preprocess_train. Expected {batch_size}, got {pixel_values_batch_tensor.shape[0]} images and {input_ids_2_batch_tensor.shape[0]} texts.")
+            # How to handle this? Returning dict of None tensors might work if collate handles it.
+            # Or perhaps raise error / return empty dict? Returning Nones seems safest for map.
+            return {
+                "pixel_values": None, # Or maybe torch.zeros()?
+                "input_ids_2": None,
+            }
 
-        for i in range(batch_size):
-            # If image processing failed (result is None), the corresponding text should also be None
-            # so the collate_fn can filter the entire example.
-            if pixel_values_list_of_tensors[i] is None:
-                final_pixel_values.append(None)
-                final_input_ids.append(None)
-            else:
-                final_pixel_values.append(pixel_values_list_of_tensors[i])
-                final_input_ids.append(input_ids_2_list_of_lists[i])
-
-        # Final sanity check
-        if len(final_pixel_values) != batch_size or len(final_input_ids) != batch_size:
-             logger.error("Internal error: Mismatch in final list lengths after combining in preprocess_train.")
-             return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
-
+        # --- Return Batch Tensors Directly ---
+        # Let dataset.map handle the unpacking
         return {
-            "pixel_values": final_pixel_values, # List of tensors or Nones
-            "input_ids_2": final_input_ids,   # List of lists or Nones
+            "pixel_values": pixel_values_batch_tensor,
+            "input_ids_2": input_ids_2_batch_tensor,
         }
 
-    except Exception as e: # Catch errors in text processing or outer logic
-        logger.error(f"Error during preprocessing batch (outer scope): {e}")
-        # Return Nones for the whole batch for safety
-        return {
-            "pixel_values": [None] * batch_size,
-            "input_ids_2": [None] * batch_size,
-        }
+    except FileNotFoundError as e:
+        logger.error(f"Error opening image file: {e}. Returning None for batch.")
+        return {"pixel_values": None, "input_ids_2": None}
+    except Exception as e:
+        logger.error(f"Error during preprocessing batch: {e}. Returning None for batch.")
+        return {"pixel_values": None, "input_ids_2": None}
 
 def preprocess_imagefolder(examples, image_transforms, image_column):
-    """Preprocesses a batch of training examples for 'imagefolder' datasets."""
+    """Preprocesses imagefolder batch using image_processor.preprocess."""
     batch_size = len(examples[image_column])
     try:
-        # Load images (assuming examples[image_column] contains PIL images)
         images = [image.convert("RGB") for image in examples[image_column]]
 
-        # Process image batch
-        pixel_values_list_of_tensors = []
-        for image in images:
-            try:
-                tensor = image_transforms(image) # Output is a tensor [C, H, W]
-                pixel_values_list_of_tensors.append(tensor)
-            except Exception as img_err:
-                logger.warning(f"Error processing image during preprocessing, skipping: {img_err}")
-                pixel_values_list_of_tensors.append(None) # Add None placeholder
+        # Process image batch using image_processor.preprocess
+        image_inputs = image_transforms(images, return_tensors="pt")
+        pixel_values_batch_tensor = image_inputs['pixel_values']
 
-        # Convert batch tensor to list of tensors
-        #pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
+        # Create dummy text inputs (batch tensor)
+        # Note: Ensure tokenizer_2 exists or define max_len
+        # max_len = 77
+        # dummy_ids = torch.zeros((batch_size, max_len), dtype=torch.long)
+        dummy_ids = torch.zeros((batch_size, 1), dtype=torch.long) # Simpler placeholder
 
-        # For image-only, create dummy/None text inputs (list of lists)
-        # Ensure tokenizer_2 is available or define max_len
-        # max_len = 77 # Or get from tokenizer if available
-        # input_ids_2_list_of_lists = [[tokenizer_2.pad_token_id] * max_len] * batch_size
-        input_ids_2_list_of_lists = [[0]] * batch_size # Simpler placeholder if tokenizer not needed/available here
-
-        # Sanity check lengths
-        if len(pixel_values_list_of_tensors) != batch_size:
-            logger.error(f"Batch size mismatch for images in preprocess_imagefolder. Expected {batch_size}, got {len(pixel_values_list_of_tensors)}.")
-            return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
+        if pixel_values_batch_tensor.shape[0] != batch_size:
+             logger.error(f"Batch size mismatch for images in preprocess_imagefolder. Expected {batch_size}, got {pixel_values_batch_tensor.shape[0]}.")
+             return {"pixel_values": None, "input_ids_2": None}
 
         return {
-            "pixel_values": pixel_values_list_of_tensors,
-            "input_ids_2": input_ids_2_list_of_lists, # Return placeholder
+            "pixel_values": pixel_values_batch_tensor,
+            "input_ids_2": dummy_ids,
         }
-
     except Exception as e:
         logger.error(f"Error during imagefolder preprocessing batch: {e}")
-        # Ensure batch_size is defined here if needed
-        batch_size = len(examples[image_column]) if image_column in examples else 0
-        return {
-            "pixel_values": [None] * batch_size,
-            "input_ids_2": [None] * batch_size,
-        }
+        return {"pixel_values": None, "input_ids_2": None}
 
 # --- Main Function ---
 def main(args):
@@ -429,107 +387,117 @@ def main(args):
         val_dataset = None
         logger.info(f"Using full dataset for training ({len(train_dataset)} samples). No validation split.")
 
-    # Define image transformations
-    image_transforms = transforms.Compose(
-        [
-            transforms.Resize(args.image_resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(args.image_resolution),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]), # Standard normalization for [-1, 1] range
-        ]
-    )
+    # Prepare the dataset
+    logger.info("Loading dataset...")
+    if args.dataset_type == "hf_metadata":
+        # Ensure dataset_path is the directory containing metadata.jsonl
+        data_files = {"train": os.path.join(args.dataset_path, "metadata.jsonl")}
+        dataset = load_dataset("json", data_files=data_files, split="train")
+        # Filter dataset if filter_field and filter_value are provided
+        if args.filter_field and args.filter_value:
+            logger.info(f"Filtering dataset: {args.filter_field} == '{args.filter_value}'")
+            dataset = dataset.filter(lambda example: example.get(args.filter_field) == args.filter_value)
+            logger.info(f"Filtered dataset size: {len(dataset)}")
+        dataset = dataset.shuffle(seed=args.seed)
 
-    logger.info("Preprocessing training data...")
-    # Ensure dataset path is absolute for image loading
-    dataset_abs_path = os.path.abspath(args.dataset_path)
-    preprocess_kwargs = {
-        "image_transforms": image_transforms,
-        "tokenizer_2": tokenizer_2,
-        "dataset_abs_path": dataset_abs_path,        # Added back
-        "image_column": args.image_column,           # Added back
-        "hash_column": args.image_column,            # Added back (using image_column value based on config)
-        "caption_column": args.caption_column         # Added back
-    }
-    train_dataset = train_dataset.map(
-        preprocess_train,
-        batched=True,
-        num_proc=1, # Changed from args.preprocessing_num_workers
-        remove_columns=train_dataset.column_names,
-        fn_kwargs=preprocess_kwargs # Pass variables here
-    )
-    # Apply preprocessing to val dataset if it exists
-    if val_dataset:
-        logger.info("Preprocessing validation data...")
-        # Ensure dataset path is absolute for image loading
-        dataset_abs_path_val = os.path.abspath(args.dataset_path) # Recalculate or reuse dataset_abs_path
-        preprocess_kwargs_val = {
-            "image_transforms": image_transforms,
-            "tokenizer_2": tokenizer_2,
-            "dataset_abs_path": dataset_abs_path_val,   # Added back
-            "image_column": args.image_column,          # Added back
-            "hash_column": args.image_column,           # Added back (using image_column value based on config)
-            "caption_column": args.caption_column        # Added back
-        }
-        val_dataset = val_dataset.map(
-            preprocess_train, # Use the same function
-            batched=True,
-            num_proc=1, # Changed from args.preprocessing_num_workers
-            remove_columns=val_dataset.column_names,
-            fn_kwargs=preprocess_kwargs_val # Pass variables here too
+        # Determine columns to remove
+        original_columns = dataset.column_names
+        # Keep necessary columns: image, caption, hash (maybe others based on config)
+        # Columns needed by preprocess_train: image_column, hash_column, caption_column
+        columns_to_keep = {args.image_column, args.hash_column, args.caption_column}
+        columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
+        logger.info(f"Columns to remove: {columns_to_remove}")
+
+        # --- Prepare Preprocessing Function --- #
+        _preprocess_train_func = partial(
+            preprocess_train,
+            dataset_abs_path=args.dataset_path,
+            # Pass the image processor's preprocess method directly
+            image_transforms=pipeline.image_processor.preprocess,
+            image_column=args.image_column,
+            hash_column=args.hash_column,
+            caption_column=args.caption_column,
+            tokenizer_2=tokenizer_2,
         )
 
-    # Collate function
+        logger.info("Preprocessing dataset...")
+        processed_dataset = dataset.map(
+            _preprocess_train_func,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=columns_to_remove,
+            desc="Running tokenizer on train dataset",
+        )
+
+    elif args.dataset_type == "imagefolder":
+        dataset = load_dataset("imagefolder", data_dir=args.dataset_path, split="train")
+        dataset = dataset.shuffle(seed=args.seed)
+        original_columns = dataset.column_names
+        columns_to_keep = {args.image_column} # Only need image for imagefolder
+        columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
+        logger.info(f"Columns to remove: {columns_to_remove}")
+
+        _preprocess_imagefolder_func = partial(
+             preprocess_imagefolder,
+             # Pass the image processor's preprocess method directly
+             image_transforms=pipeline.image_processor.preprocess,
+             image_column=args.image_column,
+        )
+        processed_dataset = dataset.map(
+             _preprocess_imagefolder_func,
+             batched=True,
+             num_proc=args.preprocessing_num_workers,
+             remove_columns=columns_to_remove,
+             desc="Running preprocessing on imagefolder dataset",
+        )
+    else:
+        raise ValueError(f"Unsupported dataset_type: {args.dataset_type}")
+
+    # --- Split Dataset --- #
+    if args.validation_split > 0.0:
+        split_seed = getattr(args, 'split_seed', args.seed)
+        logger.info(f"Splitting dataset with validation split {args.validation_split} and seed {split_seed}")
+        split_dataset = processed_dataset.train_test_split(test_size=args.validation_split, seed=split_seed)
+        train_dataset = split_dataset["train"]
+        eval_dataset = split_dataset["test"]
+        logger.info(f"Train dataset size: {len(train_dataset)}, Eval dataset size: {len(eval_dataset)}")
+    else:
+        train_dataset = processed_dataset
+        eval_dataset = None
+        logger.info(f"Train dataset size: {len(train_dataset)}")
+
+    # --- Create DataLoader --- #
+    logger.info("Creating DataLoader...")
+
+    # Collate function (Revert to simplest form)
     def collate_fn(examples):
         # Filter out examples where preprocessing might have failed (returned None)
         valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
 
         if not valid_examples:
-            logger.warning("Collate fn: No valid examples found after filtering Nones.")
+            # logger.warning("Collate fn: No valid examples found after filtering Nones.")
             return {} # Return empty batch if all examples failed
 
-        # Handle potential list wrapping of tensors
-        pixel_values_to_stack = []
-        input_ids_to_stack = []
-        for i, example in enumerate(valid_examples):
-            pv = example.get("pixel_values")
-            ids = example.get("input_ids_2")
+        # If map unpacked correctly, examples should have single tensors
+        try:
+            pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
+            input_ids_2 = torch.stack([example["input_ids_2"] for example in valid_examples])
 
-            processed_pv = None
-            if isinstance(pv, torch.Tensor):
-                processed_pv = pv
-            elif isinstance(pv, list) and len(pv) == 1 and isinstance(pv[0], torch.Tensor):
-                # Handle the case where pixel_values is a list containing a single tensor
-                processed_pv = pv[0]
-                logger.debug(f"Collate fn: Extracted tensor from list for example {i}") # Debug message
-            else:
-                # Log unexpected structure if it occurs despite filtering
-                logger.error(f"Collate fn: Unexpected structure for pixel_values in valid example {i}: {type(pv)}. Skipping.")
-                continue # Skip this example
+            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            pixel_values_to_stack.append(processed_pv)
-            input_ids_to_stack.append(torch.tensor(ids)) # Convert list of ids to tensor
-
-        if not pixel_values_to_stack:
-            logger.error("Collate fn: No valid pixel_values tensors could be extracted after handling structures.")
-            return {} # Return empty if all valid examples had unexpected structure
-
-        # Stack the processed tensors
-        pixel_values = torch.stack(pixel_values_to_stack)
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-        # Stack the input_ids tensors
-        input_ids_2 = torch.stack(input_ids_to_stack)
-
-        # Final check for consistent batch size
-        if pixel_values.shape[0] != input_ids_2.shape[0]:
-             logger.error(f"Collate fn: Batch size mismatch after stacking! PV: {pixel_values.shape[0]}, IDs: {input_ids_2.shape[0]}")
-             # Handle mismatch appropriately, e.g., raise error or return empty
+            return {
+                "pixel_values": pixel_values,
+                "input_ids_2": input_ids_2,
+            }
+        except TypeError as e:
+             # Log the type if stacking fails unexpectedly
+             first_pv_type = type(valid_examples[0]["pixel_values"]) if valid_examples else 'N/A'
+             logger.error(f"Collate fn: Stacking failed! Type Error: {e}. Type of pixel_values in first valid example: {first_pv_type}")
+             # Re-raise or return empty dict
              return {}
-        
-        return {
-            "pixel_values": pixel_values,
-            "input_ids_2": input_ids_2,
-        }
+        except Exception as e:
+            logger.error(f"Collate fn: Unexpected error during stacking: {e}")
+            return {}
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -541,10 +509,10 @@ def main(args):
 
     # Create validation dataloader if val_dataset exists
     val_dataloader = None
-    if val_dataset:
+    if eval_dataset:
         logger.info("Creating validation dataloader...")
         val_dataloader = torch.utils.data.DataLoader(
-            val_dataset,
+            eval_dataset,
             shuffle=False, # No need to shuffle validation data
             collate_fn=collate_fn,
             batch_size=args.validation_batch_size, # Use specific validation batch size from args
@@ -589,8 +557,8 @@ def main(args):
 
     logger.info("***** Running training *****")
     logger.info(f"  Num training examples = {len(train_dataset)}")
-    if val_dataset: # Check if val_dataset was created before logging its length
-        logger.info(f"  Num validation examples = {len(val_dataset)}")
+    if eval_dataset: # Check if eval_dataset was created before logging its length
+        logger.info(f"  Num validation examples = {len(eval_dataset)}")
     logger.info(f"  Num Epochs = {args.epochs}")
     logger.info(f"  Instantaneous batch size per device = {args.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
@@ -847,7 +815,7 @@ def main(args):
 
         # --- Validation Phase --- 
         avg_val_loss = 0.0
-        if val_dataloader:
+        if eval_dataset:
             logger.info(f"Running validation for epoch {epoch}...")
             transformer.eval() # Use transformer
             val_loss = 0.0
@@ -981,7 +949,7 @@ def main(args):
                 "train_loss_epoch": avg_train_loss_epoch,
                 "train_throughput_img_sec": train_throughput,
             }
-            if val_dataloader:
+            if eval_dataset:
                 log_metrics["val_loss_epoch"] = avg_val_loss
             
             logger.info(f"Epoch {epoch} Summary: {log_metrics}")
@@ -1008,7 +976,7 @@ def main(args):
         logger.info(f"  Total training time: {total_training_time_seconds:.2f} seconds ({total_training_time_seconds/3600:.2f} hours)")
         logger.info(f"  Average time per step: {avg_time_per_step_seconds:.4f} seconds")
         logger.info(f"  Number of training images used: {num_training_images}")
-        if val_dataloader:
+        if eval_dataset:
             logger.info(f"  Best validation loss achieved: {best_val_loss:.4f}")
         logger.info(f"  Number of epochs completed: {epoch + 1 if 'epoch' in locals() else 'N/A'} / {args.epochs}")
 
