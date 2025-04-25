@@ -702,10 +702,6 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
-                # Generate img_ids tensor based on latents_reshaped dimensions
-                seq_len = latents_reshaped.shape[1]
-                img_ids = torch.arange(seq_len, device=latents.device).repeat(bsz, 1)
-
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
@@ -720,7 +716,6 @@ def main(args):
                     encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
                     pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
                     txt_ids=input_ids_2, # T5 IDs (None for img-only)
-                    img_ids=img_ids,
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -816,11 +811,6 @@ def main(args):
                     latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
                     logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
-                    # Generate img_ids for validation
-                    bsz_val = latents_reshaped_val.shape[0]
-                    seq_len_val = latents_reshaped_val.shape[1]
-                    img_ids_val = torch.arange(seq_len_val, device=latents.device).repeat(bsz_val, 1)
-
                     # Encode prompts for validation batch
                     with torch.no_grad():
                         # CLIP Embeddings
@@ -844,7 +834,6 @@ def main(args):
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2,
                         txt_ids=val_batch["input_ids_2"], # Re-added T5 token IDs
-                        img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
 
                     # Assume target is noise for validation loss calculation
