@@ -417,10 +417,7 @@ def main(args):
     # --- Add LoRA to transformer (UNet equivalent) ---
     if args.peft_method == "LoRA":
         logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
-        target_modules = (
-                ["to_q","to_k","to_v"] if hasattr(transformer, "to_q")
-                else ["q_proj","k_proj","v_proj"]
-            )
+        target_modules = ["to_q","to_k","to_v"]
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
