@@ -107,63 +107,72 @@ def parse_args():
 
 # --- Data Preprocessing Helper Functions ---
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, caption_column, tokenizer_2):
-    """Preprocesses a batch of training examples using standard batched processing."""
+    """Preprocesses a batch of training examples."""
     image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[image_column]]
     batch_size = len(image_paths)
 
     try:
-        # Load images
-        images = [Image.open(path).convert("RGB") for path in image_paths] # List of PIL Images
+        # --- Image Processing (Individual Application of Compose Transform) ---
+        pixel_values_list_of_tensors = []
+        for path in image_paths:
+            try:
+                image = Image.open(path).convert("RGB")
+                # Apply the torchvision Compose transform to the single PIL image
+                tensor = image_transforms(image) # Output is a tensor [C, H, W]
+                pixel_values_list_of_tensors.append(tensor)
+            except FileNotFoundError:
+                logger.warning(f"Image file not found during preprocessing, skipping: {path}")
+                pixel_values_list_of_tensors.append(None) # Add None placeholder
+            except Exception as img_err:
+                logger.warning(f"Error processing image {path} during preprocessing, skipping: {img_err}")
+                pixel_values_list_of_tensors.append(None) # Add None placeholder
 
-        # Process image batch -> returns dict {'pixel_values': tensor[B, C, H, W]}
-        # Note: image_transforms is assumed to be pipeline.image_processor.preprocess
-        image_inputs = image_transforms(images, return_tensors="pt")
-        pixel_values_batch_tensor = image_inputs['pixel_values'] # Tensor [B, C, H, W]
-
-        # Process text batch
+        # --- Text Processing (Batched) ---
         captions = [str(c) if c is not None else "" for c in examples[caption_column]]
-        # Tokenizer returns dict {'input_ids': tensor[B, SeqLen], ...}
-        # Ensure tokenizer_2 has model_max_length set or use a default
-        max_len = getattr(tokenizer_2, 'model_max_length', 512) # Example default
+        max_len = getattr(tokenizer_2, 'model_max_length', 512) # Use tokenizer's max_length or default
         text_inputs = tokenizer_2(
             captions,
             padding="max_length",
             max_length=max_len,
             truncation=True,
-            return_tensors="pt"
+            return_tensors="pt" # Tokenizer expects this
         )
         input_ids_2_batch_tensor = text_inputs['input_ids'] # Tensor [B, SeqLen]
-
-        # Convert batch tensors to lists for dataset.map compatibility
-        # Unbind tensor [B, C, H, W] into list [tensor[C,H,W], tensor[C,H,W], ...]
-        pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
-        # Convert tensor [B, SeqLen] into list [[id1, ...], [id2, ...], ...]
+        # Convert text tensor to list of lists for map compatibility
         input_ids_2_list_of_lists = input_ids_2_batch_tensor.tolist()
 
-        # Sanity check lengths
+        # --- Combine Results & Handle Nones ---
+        # Ensure output lists correspond correctly, propagating Nones
+        final_pixel_values = []
+        final_input_ids = []
         if len(pixel_values_list_of_tensors) != batch_size or len(input_ids_2_list_of_lists) != batch_size:
-            logger.error(f"Batch size mismatch after processing in preprocess_train. Expected {batch_size}, got {len(pixel_values_list_of_tensors)} images and {len(input_ids_2_list_of_lists)} texts.")
-            # Handle error appropriately - maybe return None lists?
-            return {
-                "pixel_values": [None] * batch_size,
-                "input_ids_2": [None] * batch_size,
-            }
+             logger.error(f"Internal batch size mismatch before combining: images={len(pixel_values_list_of_tensors)}, texts={len(input_ids_2_list_of_lists)}, expected={batch_size}")
+             # Return Nones for safety if intermediate processing failed unexpectedly
+             return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
+
+        for i in range(batch_size):
+            # If image processing failed (result is None), the corresponding text should also be None
+            # so the collate_fn can filter the entire example.
+            if pixel_values_list_of_tensors[i] is None:
+                final_pixel_values.append(None)
+                final_input_ids.append(None)
+            else:
+                final_pixel_values.append(pixel_values_list_of_tensors[i])
+                final_input_ids.append(input_ids_2_list_of_lists[i])
+
+        # Final sanity check
+        if len(final_pixel_values) != batch_size or len(final_input_ids) != batch_size:
+             logger.error("Internal error: Mismatch in final list lengths after combining in preprocess_train.")
+             return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
 
         return {
-            "pixel_values": pixel_values_list_of_tensors,
-            "input_ids_2": input_ids_2_list_of_lists,
+            "pixel_values": final_pixel_values, # List of tensors or Nones
+            "input_ids_2": final_input_ids,   # List of lists or Nones
         }
 
-    except FileNotFoundError as e:
-        logger.error(f"Error opening image file: {e}. Skipping batch.")
-        # Return structure with Nones matching batch size
-        return {
-            "pixel_values": [None] * batch_size,
-            "input_ids_2": [None] * batch_size,
-        }
-    except Exception as e:
-        logger.error(f"Error during preprocessing batch: {e}")
-        # Return structure with Nones matching batch size
+    except Exception as e: # Catch errors in text processing or outer logic
+        logger.error(f"Error during preprocessing batch (outer scope): {e}")
+        # Return Nones for the whole batch for safety
         return {
             "pixel_values": [None] * batch_size,
             "input_ids_2": [None] * batch_size,
@@ -177,11 +186,17 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
         images = [image.convert("RGB") for image in examples[image_column]]
 
         # Process image batch
-        image_inputs = image_transforms(images, return_tensors="pt")
-        pixel_values_batch_tensor = image_inputs['pixel_values']
+        pixel_values_list_of_tensors = []
+        for image in images:
+            try:
+                tensor = image_transforms(image) # Output is a tensor [C, H, W]
+                pixel_values_list_of_tensors.append(tensor)
+            except Exception as img_err:
+                logger.warning(f"Error processing image during preprocessing, skipping: {img_err}")
+                pixel_values_list_of_tensors.append(None) # Add None placeholder
 
         # Convert batch tensor to list of tensors
-        pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
+        #pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
 
         # For image-only, create dummy/None text inputs (list of lists)
         # Ensure tokenizer_2 is available or define max_len
@@ -201,6 +216,8 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
 
     except Exception as e:
         logger.error(f"Error during imagefolder preprocessing batch: {e}")
+        # Ensure batch_size is defined here if needed
+        batch_size = len(examples[image_column]) if image_column in examples else 0
         return {
             "pixel_values": [None] * batch_size,
             "input_ids_2": [None] * batch_size,
