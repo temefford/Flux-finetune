@@ -575,7 +575,7 @@ def main(args):
                 attention_mask_2 = batch["attention_mask_2"]
 
                 # Move pixel values to device and cast to VAE's expected dtype
-                pixel_values_device = pixel_values.to(accelerator.device, dtype=weight_dtype)
+                pixel_values_device = pixel_values
 
                 # Encode pixel values -> latents
                 # VAE is already on the correct device and dtype (float16)
@@ -583,7 +583,7 @@ def main(args):
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
 
                 latents = latents * vae.config.scaling_factor
-                latents = latents.to(accelerator.device) # Ensure latents are on the correct device
+                latents = latents
 
                 # Apply projection layer if defined
                 logger.debug(f"Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
@@ -598,7 +598,6 @@ def main(args):
                     latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
                     projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
                     latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
-                    latents = latents.to(accelerator.device) # Ensure projected latents are on device
                     logger.debug(f"Projected latents shape: {latents.shape}")
                     
                 # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
@@ -609,7 +608,7 @@ def main(args):
                 # Generate img_ids tensor based on latents_reshaped dimensions
                 batch_size = latents_reshaped.shape[0]
                 seq_len = latents_reshaped.shape[1]
-                img_ids = torch.arange(seq_len, device=accelerator.device).repeat(batch_size, 1)
+                img_ids = torch.arange(seq_len, device=latents.device).repeat(batch_size, 1)
 
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
@@ -643,12 +642,11 @@ def main(args):
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
-                    hidden_states=latents_reshaped.to(accelerator.device),
-                    timestep=timesteps.to(accelerator.device),
-                    encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
-                    txt_pooled=clip_pooled.to(accelerator.device),
-                    txt_ids=input_ids_2.to(accelerator.device),
-                    img_ids=img_ids, # Provide the generated patch indices
+                    latents_reshaped,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds_2,
+                    txt_ids=input_ids_2,
+                    img_ids=img_ids,
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -719,7 +717,7 @@ def main(args):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
                     # Ensure pixel_values are on the correct device and dtype
-                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
+                    pixel_values_device = val_batch["pixel_values"]
 
                     # Encode pixel values -> latents
                     # VAE is already on the correct device and dtype (float16)
@@ -727,7 +725,7 @@ def main(args):
                     logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
 
                     latents = latents * vae.config.scaling_factor
-                    latents = latents.to(accelerator.device) # Ensure latents are on the correct device
+                    latents = latents
 
                     # Apply projection layer if defined
                     logger.debug(f"Validation: Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
@@ -740,7 +738,6 @@ def main(args):
                         latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
                         projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
                         latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
-                        latents = latents.to(accelerator.device) # Ensure projected latents are on device
                         logger.debug(f"Validation: Projected latents shape: {latents.shape}")
                         
                     # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
@@ -751,12 +748,12 @@ def main(args):
                     # Encode prompts for validation batch
                     with torch.no_grad():
                         # CLIP Embeddings
-                        prompt_embeds_outputs = text_encoder(val_batch["input_ids"].to(accelerator.device), output_hidden_states=True)
+                        prompt_embeds_outputs = text_encoder(val_batch["input_ids"], output_hidden_states=True)
                         prompt_embeds = prompt_embeds_outputs.last_hidden_state
                         clip_pooled = prompt_embeds_outputs.pooler_output
 
                         # T5 Embeddings
-                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"].to(accelerator.device), output_hidden_states=True)
+                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"], output_hidden_states=True)
                         prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
 
                     # Sample noise and timesteps for validation
@@ -767,11 +764,10 @@ def main(args):
 
                     # Predict noise using the model
                     model_pred_val = transformer(
-                        hidden_states=latents_reshaped_val.to(accelerator.device),
-                        timestep=timesteps.to(accelerator.device),
-                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
-                        txt_pooled=clip_pooled.to(accelerator.device),
-                        txt_ids=val_batch["input_ids_2"].to(accelerator.device),
+                        latents_reshaped_val,
+                        timestep=timesteps,
+                        encoder_hidden_states=prompt_embeds_2,
+                        txt_ids=val_batch["input_ids_2"],
                     ).sample
 
                     # Assume target is noise for validation loss calculation
