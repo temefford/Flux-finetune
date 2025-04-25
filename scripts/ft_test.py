@@ -645,7 +645,7 @@ def main(args):
                     latents_reshaped,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds_2,
-                    pooled_prompt_embeds=clip_pooled, # Try this name for CLIP pooled embeds
+                    txt_ids=input_ids_2, # Re-added T5 token IDs
                     img_ids=img_ids,
                 ).sample
 
@@ -772,7 +772,7 @@ def main(args):
                         latents_reshaped_val,
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2,
-                        pooled_prompt_embeds=clip_pooled, # Use same name here
+                        txt_ids=val_batch["input_ids_2"], # Re-added T5 token IDs for validation
                         img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
 
