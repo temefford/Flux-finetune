@@ -114,17 +114,40 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     batch_size = len(image_paths)
 
     try:
-        # Load images into a list of PIL Images
-        images = [Image.open(path).convert("RGB") for path in image_paths]
+        # --- Load Images Individually with Error Handling --- #
+        images = []
+        valid_image_paths = [] # Keep track of paths for images loaded successfully
+        for path in image_paths:
+            try:
+                img = Image.open(path).convert("RGB")
+                images.append(img)
+                valid_image_paths.append(path)
+            except IndexError as ie:
+                logger.error(f"IndexError loading/converting image: {path}. Error: {ie}. Appending None.")
+                images.append(None) # Append None if specific image fails
+            except FileNotFoundError:
+                 logger.warning(f"Image file not found during preprocessing: {path}. Appending None.")
+                 images.append(None)
+            except Exception as img_err:
+                 logger.warning(f"Error loading/converting image {path}: {img_err}. Appending None.")
+                 images.append(None)
+
+        # Filter out None entries before passing to processor
+        valid_images = [img for img in images if img is not None]
+
+        if not valid_images:
+            logger.error("No valid images could be loaded in this batch.")
+            return {"pixel_values": None, "input_ids_2": None}
 
         # --- Image Processing (Batched using image_processor.preprocess) ---
-        # Log the paths being processed in this batch for debugging
-        logger.info(f"Preprocessing batch with image paths: {image_paths}")
+        # Log the paths *intended* for this batch (even if some failed loading)
+        logger.info(f"Attempting to preprocess batch for image paths: {image_paths}")
+        # Log the paths for images that were *successfully* loaded and are being processed
+        logger.info(f"Processing valid image paths: {valid_image_paths}")
 
         # image_transforms is now pipeline.image_processor.preprocess
-        # It expects a list of images and returns a dict with batch tensor/numpy array
-        # VaeImageProcessor does not accept return_tensors="pt"
-        image_inputs = image_transforms(images)
+        # Pass only the successfully loaded images
+        image_inputs = image_transforms(valid_images)
         pixel_values_maybe_numpy = image_inputs['pixel_values'] # Might be numpy array
 
         # Convert to tensor if it's a numpy array
@@ -138,41 +161,55 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
              return {"pixel_values": None, "input_ids_2": None}
 
         # --- Text Processing (Batched) ---
-        captions = [str(c) if c is not None else "" for c in examples[caption_column]]
-        max_len = getattr(tokenizer_2, 'model_max_length', 512)
-        text_inputs = tokenizer_2(
-            captions, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
-        )
-        input_ids_2_batch_tensor = text_inputs['input_ids'] # Tensor [B, SeqLen]
+        # IMPORTANT: Need to ensure text corresponds to *valid* images
+        # We need the original indices of the valid images to select the correct captions
+        valid_indices = [i for i, img in enumerate(images) if img is not None]
+        if len(valid_indices) != len(valid_images):
+             logger.error("Mismatch between valid_images and valid_indices counts.")
+             # Handle error case - maybe return None for batch
+             return {"pixel_values": None, "input_ids_2": None}
 
-        # --- Sanity Check Batch Sizes ---
-        if pixel_values_batch_tensor.shape[0] != batch_size or input_ids_2_batch_tensor.shape[0] != batch_size:
-            logger.error(f"Batch size mismatch after processing in preprocess_train. Expected {batch_size}, got {pixel_values_batch_tensor.shape[0]} images and {input_ids_2_batch_tensor.shape[0]} texts.")
-            # How to handle this? Returning dict of None tensors might work if collate handles it.
-            # Or perhaps raise error / return empty dict? Returning Nones seems safest for map.
+        # Select captions corresponding to the valid images
+        valid_captions = [str(examples[caption_column][i]) if examples[caption_column][i] is not None else "" for i in valid_indices]
+
+        # Process only the valid captions
+        max_len = getattr(tokenizer_2, 'model_max_length', 512)
+        if not valid_captions:
+             logger.error("No valid captions found corresponding to valid images.")
+             return {"pixel_values": None, "input_ids_2": None} # Should align with no valid images case
+
+        text_inputs = tokenizer_2(
+            valid_captions, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+        )
+        input_ids_2_batch_tensor = text_inputs['input_ids'] # Tensor [NumValid, SeqLen]
+
+        # --- Sanity Check Batch Sizes (Should match num valid images) ---
+        num_valid = len(valid_images)
+        if pixel_values_batch_tensor.shape[0] != num_valid or input_ids_2_batch_tensor.shape[0] != num_valid:
+            logger.error(f"Batch size mismatch after processing valid items in preprocess_train. Expected {num_valid}, got {pixel_values_batch_tensor.shape[0]} images and {input_ids_2_batch_tensor.shape[0]} texts.")
             return {
-                "pixel_values": None, # Or maybe torch.zeros()?
+                "pixel_values": None,
                 "input_ids_2": None,
             }
 
-        # --- Return Batch Tensors Directly ---
-        # Let dataset.map handle the unpacking
+        # --- Return Batch Tensors ---
+        # Note: The dataset.map function expects the output dict keys to align with dataset columns.
+        # However, the tensors we return now correspond only to the *valid* examples in the input batch.
+        # This mismatch might cause issues if dataset.map strictly requires output lists/tensors
+        # to have the same length as the input batch size.
+        # A potential solution is to pad the output tensors with dummy data for the failed examples,
+        # or structure the return differently if map allows it. Let's try returning directly first.
+        # If map complains, we might need to return lists of tensors/Nones again.
         return {
-            "pixel_values": pixel_values_batch_tensor,
-            "input_ids_2": input_ids_2_batch_tensor,
+            "pixel_values": pixel_values_batch_tensor, # Tensor for valid images
+            "input_ids_2": input_ids_2_batch_tensor,   # Tensor for valid captions
         }
 
-    except FileNotFoundError as e:
+    except FileNotFoundError as e: # This might be redundant now
         logger.error(f"Error opening image file: {e}. Returning None for batch.")
         return {"pixel_values": None, "input_ids_2": None}
-    except IndexError as ie:
-        logger.error(f"IndexError during preprocessing batch: {ie}. This might indicate an issue with tensor dimensions during image/text processing. Returning None for batch.")
-        # Optionally log shapes if variables are accessible
-        # logger.error(f" Pixel values shape: {pixel_values_batch_tensor.shape if 'pixel_values_batch_tensor' in locals() else 'N/A'}")
-        # logger.error(f" Input IDs shape: {input_ids_2_batch_tensor.shape if 'input_ids_2_batch_tensor' in locals() else 'N/A'}")
-        return {"pixel_values": None, "input_ids_2": None}
     except Exception as e:
-        logger.error(f"General error during preprocessing batch: {e}. Returning None for batch.")
+        logger.error(f"General error during preprocessing batch (after image loading): {e}")
         return {"pixel_values": None, "input_ids_2": None}
 
 def preprocess_imagefolder(examples, image_transforms, image_column):
