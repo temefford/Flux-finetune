@@ -21,6 +21,8 @@ from peft import LoraConfig, PeftModel
 from PIL import Image
 from tqdm.auto import tqdm
 
+import numpy as np # Import numpy for type checking
+
 logger = get_logger(__name__)
 
 # --- Argument Parsing ---
@@ -117,9 +119,20 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
 
         # --- Image Processing (Batched using image_processor.preprocess) ---
         # image_transforms is now pipeline.image_processor.preprocess
-        # It expects a list of images and returns a dict with batch tensor
-        image_inputs = image_transforms(images, return_tensors="pt")
-        pixel_values_batch_tensor = image_inputs['pixel_values'] # Tensor [B, C, H, W]
+        # It expects a list of images and returns a dict with batch tensor/numpy array
+        # VaeImageProcessor does not accept return_tensors="pt"
+        image_inputs = image_transforms(images)
+        pixel_values_maybe_numpy = image_inputs['pixel_values'] # Might be numpy array
+
+        # Convert to tensor if it's a numpy array
+        if isinstance(pixel_values_maybe_numpy, np.ndarray):
+            pixel_values_batch_tensor = torch.from_numpy(pixel_values_maybe_numpy)
+        elif isinstance(pixel_values_maybe_numpy, torch.Tensor):
+            pixel_values_batch_tensor = pixel_values_maybe_numpy # Already a tensor
+        else:
+             logger.error(f"Unexpected type from VaeImageProcessor: {type(pixel_values_maybe_numpy)}. Expected numpy array or tensor.")
+             # Handle error: return None to be filtered by collate_fn
+             return {"pixel_values": None, "input_ids_2": None}
 
         # --- Text Processing (Batched) ---
         captions = [str(c) if c is not None else "" for c in examples[caption_column]]
