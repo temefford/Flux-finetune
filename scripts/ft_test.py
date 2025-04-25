@@ -52,7 +52,6 @@ def parse_args():
 
     # Create Namespace from YAML config
     args = argparse.Namespace(**config)
-    # print(f"DEBUG: Args loaded from YAML: {vars(args)}") # <-- DEBUG PRINT REMOVED
 
     # Apply command-line overrides (if provided)
     # Logging will happen in main() after accelerator is initialized
@@ -161,44 +160,53 @@ def preprocess_func(examples, **fn_kwargs):
         raise ValueError("Missing required kwargs in preprocess_func (image_transforms, tokenizer, tokenizer_2, args)")
 
     # 1. Load and Transform Images
+    # For 'imagefolder', the 'image' column contains PIL Image objects
+    # For 'hf_metadata', it might contain paths or bytes - adjust loading if needed
     try:
         images = [image.convert("RGB") for image in examples[args.image_column]]
     except Exception as e:
         logger.error(f"Error accessing/converting image column '{args.image_column}': {e}")
         logger.error(f"Example keys: {examples.keys()}")
+        # Handle potential issues like incorrect column name or non-image data
+        # For now, let's re-raise or return an empty dict to signal failure
         raise e # Or handle more gracefully
 
-    # Stack images into a batch tensor
     pixel_values = torch.stack([image_transforms(image) for image in images])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float() # Apply formatting here
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-    # 2. Tokenize Captions
-    num_examples = len(images)
+    # 2. Tokenize Captions (Handle 'imagefolder' case)
     if args.dataset_type == "imagefolder":
-        # Create dummy captions for this batch
-        dummy_captions = ["" for _ in range(num_examples)]
-        # Use a temporary dict for tokenization
-        temp_examples_for_tokenization = {args.caption_column: dummy_captions}
-        captions_batch = tokenize_captions((tokenizer, tokenizer_2), temp_examples_for_tokenization, text_column=args.caption_column)
-    elif args.dataset_type == "hf_metadata":
+        # Generate dummy captions and add them directly to the examples dict
+        num_examples = len(images) # Use length of successfully loaded images
+        examples[args.caption_column] = ["" for _ in range(num_examples)] # Add dummy captions under the expected key
+        # Now call tokenize_captions with the modified examples dict
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+    elif args.dataset_type == "hf_metadata": # Assuming hf_metadata has the caption column
+        # Check if caption column exists before accessing
         if args.caption_column not in examples:
+            logger.error(f"Caption column '{args.caption_column}' not found in 'hf_metadata' dataset example.")
+            logger.error(f"Available columns: {list(examples.keys())}")
+            # Decide how to handle: raise error, skip example, use empty caption?
             raise KeyError(f"Caption column '{args.caption_column}' missing for hf_metadata.")
-        # Pass the original examples dict directly
-        captions_batch = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
     else:
+        # Should not happen if initial loading logic is correct, but good to handle
+        logger.error(f"Preprocessing encountered unexpected dataset type: {args.dataset_type}")
+        # Fallback or raise error
         raise ValueError(f"Unsupported dataset type in preprocess_func: {args.dataset_type}")
 
-    # captions_batch already contains batch tensors from tokenize_captions
+    # 3. VAE Encoding (if not done in training loop)
+    # Moved VAE encoding to the training loop for efficiency
+    # latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
+    # latents = latents * vae.config.scaling_factor
 
-    # 3. VAE Encoding moved to training loop
-
-    # Return processed data as batch tensors
+    # Return processed data
     return {
         "pixel_values": pixel_values,
-        "input_ids": captions_batch["input_ids"],
-        "input_ids_2": captions_batch["input_ids_2"],
-        "attention_mask": captions_batch["attention_mask"],
-        "attention_mask_2": captions_batch["attention_mask_2"],
+        "input_ids": captions["input_ids"],
+        "input_ids_2": captions["input_ids_2"],
+        "attention_mask": captions["attention_mask"],
+        "attention_mask_2": captions["attention_mask_2"],
     }
 
 # --- Main Function ---
@@ -296,11 +304,6 @@ def main(args):
         tokenizer_2 = pipeline.tokenizer_2
         logger.info("Tokenizers extracted.")
 
-        # Instantiate a standard diffusion scheduler FOR THE TRAINING LOOP NOISE ADDITION
-        # Use the config from the original scheduler to maintain compatibility (e.g., num_steps)
-        train_noise_scheduler = diffusers.DDPMScheduler.from_config(pipeline.scheduler.config)
-        logger.info(f"Instantiated {type(train_noise_scheduler).__name__} for training noise addition.")
-
     except Exception as e:
         logger.error(f"Failed to load models or components: {e}")
         return
@@ -314,14 +317,13 @@ def main(args):
     # --- Add LoRA to transformer (UNet equivalent) ---
     if args.peft_method == "LoRA":
         logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
-
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
-            target_modules=["add_q_proj", "add_k_proj", "add_v_proj"], # Corrected target modules
-            lora_dropout=args.lora_dropout,
-            init_lora_weights="gaussian",
-            bias="none", # Bias can be 'none', 'all', or 'lora_only'
+            # Target the Q, K, V projections based on printed names
+            target_modules=["to_q", "to_k", "to_v"], # Corrected target modules
+            lora_dropout=0.1, # Optional dropout
+            bias="none",
         )
         transformer.add_adapter(transformer_lora_config)
         # Ensure LoRA layers are float32 for stability if using mixed precision
@@ -329,7 +331,7 @@ def main(args):
              for name, param in transformer.named_parameters():
                 if "lora_" in name:
                     param.data = param.data.to(torch.float32)
-        logger.info(f"Added LoRA with rank {args.lora_rank} to {{'add_q_proj', 'add_k_proj', 'add_v_proj'}}")
+        logger.info(f"Added LoRA with rank {args.lora_rank} to {transformer_lora_config.target_modules}")
 
     else:
         logger.warning(f"PEFT method '{args.peft_method}' not implemented for this script. Training full model.")
@@ -345,20 +347,22 @@ def main(args):
             f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, "
             f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
         )
-        # Use Conv2d for spatial projection - keeps dtype and avoids flatten/unflatten
-        vae_to_transformer_projection = torch.nn.Conv2d(vae_latent_channels_actual, transformer_in_channels_actual, kernel_size=1, bias=False)
+        vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
         vae_to_transformer_projection.to(accelerator.device, dtype=weight_dtype)
-        params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
-        for param in vae_to_transformer_projection.parameters():
-            param.requires_grad = True 
-        params_to_optimize.extend(vae_to_transformer_projection.parameters())
-        logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
     else:
         # This case seems unlikely given the error, but included for completeness
         logger.info("VAE output and Transformer input channels match according to configs.")
         vae_to_transformer_projection = None
  
     # --- Optimizer Setup --- 
+    params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    if vae_to_transformer_projection is not None:
+        # Ensure projection layer params require grad and add them
+        for param in vae_to_transformer_projection.parameters():
+            param.requires_grad = True 
+        params_to_optimize.extend(vae_to_transformer_projection.parameters())
+        logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
+
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=float(args.learning_rate), # Ensure learning_rate is float
@@ -381,7 +385,6 @@ def main(args):
             split="train",
         )
         logger.info(f"Loaded dataset with {len(dataset)} examples.")
-
     elif args.dataset_type == "hf_metadata":
         metadata_path = os.path.join(dataset_abs_path, "metadata.json")
         logger.info(f"Checking for metadata file for 'hf_metadata' type: {metadata_path}")
@@ -402,14 +405,13 @@ def main(args):
     else:
         raise ValueError("Unsupported dataset type. Please use 'imagefolder' or 'hf_metadata'.")
 
-    # Split dataset if validation_split is defined in config
-    if 'validation_split' in args.__dict__ and args.validation_split > 0.0:
-        if not (0 < args.validation_split < 1):
-            raise ValueError("validation_split must be between 0 and 1.")
-        logger.info(f"Splitting dataset with validation split: {args.validation_split}")
-        # Use the seed from config if available, otherwise use the main script seed
-        split_seed = args.seed
-        split_dataset = dataset.train_test_split(test_size=args.validation_split, seed=split_seed)
+    # --- Split Dataset --- #
+    if args.val_split > 0.0:
+        if not (0 < args.val_split < 1):
+            raise ValueError("val_split must be between 0 and 1 (exclusive)")
+        logger.info(f"Splitting dataset with validation split: {args.val_split}")
+        # Use the datasets library's built-in splitting method
+        split_dataset = dataset.train_test_split(test_size=args.val_split, seed=args.seed)
         train_dataset = split_dataset["train"]
         val_dataset = split_dataset["test"]
         logger.info(f"  Training samples: {len(train_dataset)}")
@@ -440,12 +442,9 @@ def main(args):
         preprocess_func,
         batched=True,
         num_proc=1, # Changed from args.preprocessing_num_workers
-        remove_columns=train_dataset.column_names, # Re-add remove_columns
+        remove_columns=train_dataset.column_names,
         fn_kwargs=preprocess_kwargs # Pass variables here
     )
-    train_dataset.set_format(type="torch", columns=["pixel_values", "input_ids", "input_ids_2", "attention_mask", "attention_mask_2"])
-    logger.info(f"Train dataset features after map+set_format: {train_dataset.features}") # Log features
-
     # Apply preprocessing to val dataset if it exists
     if val_dataset:
         logger.info("Preprocessing validation data...")
@@ -453,17 +452,39 @@ def main(args):
             preprocess_func,
             batched=True,
             num_proc=1, # Changed from args.preprocessing_num_workers
-            remove_columns=val_dataset.column_names, # Re-add remove_columns
+            remove_columns=val_dataset.column_names,
             fn_kwargs=preprocess_kwargs # Pass variables here too
         )
-        val_dataset.set_format(type="torch", columns=["pixel_values", "input_ids", "input_ids_2", "attention_mask", "attention_mask_2"])
-        logger.info(f"Validation dataset features after map+set_format: {val_dataset.features}") # Log features
+
+    # Collate function
+    def collate_fn(examples):
+        pixel_values = torch.stack([torch.tensor(example["pixel_values"]) for example in examples])
+        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+        input_ids = torch.stack([torch.tensor(example["input_ids"]) for example in examples])
+        attention_mask = torch.stack([torch.tensor(example["attention_mask"]) for example in examples])
+
+        batch = {
+            "pixel_values": pixel_values,
+            "input_ids": input_ids,
+            "attention_mask": attention_mask,
+        }
+
+        # Add text_encoder_2 inputs if they exist in the batch
+        if 'input_ids_2' in examples[0]:
+            input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples])
+            attention_mask_2 = torch.stack([torch.tensor(example["attention_mask_2"]) for example in examples])
+            batch["input_ids_2"] = input_ids_2
+            batch["attention_mask_2"] = attention_mask_2
+
+        return batch
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
+        collate_fn=collate_fn,
         batch_size=args.batch_size,
-        num_workers=args.dataloader_num_workers,
+        num_workers=args.dataloader_num_workers, # Use arg for num_workers
     )
 
     # Create validation dataloader if val_dataset exists
@@ -473,29 +494,30 @@ def main(args):
         val_dataloader = torch.utils.data.DataLoader(
             val_dataset,
             shuffle=False, # No need to shuffle validation data
+            collate_fn=collate_fn,
             batch_size=args.validation_batch_size, # Use specific validation batch size from args
             num_workers=args.dataloader_num_workers,
         )
 
     # --- Learning Rate Scheduler ---
-    overrode_max_train_steps = False
-    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if args.max_train_steps is None:
-        args.max_train_steps = args.epochs * num_update_steps_per_epoch
-        overrode_max_train_steps = True
-
-    # Create the learning rate scheduler *after* finalizing max_train_steps
     lr_scheduler = get_scheduler(
-        args.lr_scheduler,
+        "cosine", # Common scheduler type
         optimizer=optimizer,
-        num_warmup_steps=args.lr_warmup_steps * accelerator.num_processes,
-        num_training_steps=args.max_train_steps * accelerator.num_processes,
+        num_warmup_steps=50, # Example warmup steps
+        num_training_steps=(len(train_dataloader) * args.epochs) // args.gradient_accumulation_steps,
     )
 
-    # Prepare everything with our `accelerator`.
-    transformer, optimizer, train_dataloader, lr_scheduler, vae_to_transformer_projection = accelerator.prepare(
-        transformer, optimizer, train_dataloader, lr_scheduler, vae_to_transformer_projection
-    )
+    # --- Prepare with Accelerator ---
+    # Prepare relevant items (handle val_dataloader conditionally)
+    logger.info("Preparing models and dataloaders with Accelerator...")
+    if val_dataloader:
+        transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader = accelerator.prepare(
+            transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader
+        )
+    else:
+        transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer, optimizer, train_dataloader, lr_scheduler
+        )
 
     # Move text_encoder to device
     text_encoder.to(accelerator.device)
@@ -503,10 +525,13 @@ def main(args):
 
     # --- Calculate Training Steps --- 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    if overrode_max_train_steps:
-        args.max_train_steps = args.epochs * num_update_steps_per_epoch
-    # Afterwards we recalculate our number of training epochs
-    args.num_train_epochs = math.ceil(args.max_train_steps / num_update_steps_per_epoch)
+    if args.max_train_steps is not None and args.max_train_steps > 0:
+        max_train_steps = args.max_train_steps
+        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch) # Recalculate epochs based on max_train_steps
+        logger.info(f"Training for a fixed {max_train_steps} steps, overriding epochs to {args.epochs}.")
+    else:
+        max_train_steps = args.epochs * num_update_steps_per_epoch
+        logger.info(f"Training for {args.epochs} epochs, corresponding to {max_train_steps} steps.")
 
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -518,14 +543,14 @@ def main(args):
     logger.info(f"  Instantaneous batch size per device = {args.batch_size}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {args.gradient_accumulation_steps}")
-    logger.info(f"  Total optimization steps = {args.max_train_steps}")
+    logger.info(f"  Total optimization steps = {max_train_steps}")
 
     global_step = 0
     first_epoch = 0
     best_val_loss = float('inf') # Initialize best validation loss tracking
 
     progress_bar = tqdm(
-        range(global_step, args.max_train_steps),
+        range(global_step, max_train_steps),
         disable=not accelerator.is_local_main_process,
     )
     progress_bar.set_description("Steps")
@@ -541,12 +566,43 @@ def main(args):
         epoch_start_time = time.time() # Record time at the start of the epoch
 
         for step, batch in enumerate(train_dataloader):
-            # Move batch data to the correct device and dtype ONCE
+            # Move pixel values to device/dtype
             pixel_values = batch["pixel_values"].to(accelerator.device, dtype=weight_dtype)
-            # Only move text inputs if they exist (handle imagefolder case)
-            input_ids = batch["input_ids"].to(accelerator.device) if batch["input_ids"] is not None else None
-            input_ids_2 = batch["input_ids_2"].to(accelerator.device) if batch["input_ids_2"] is not None else None
+            batch_size = pixel_values.shape[0] # Get batch size from pixel_values
 
+            # --- Prepare Conditional Inputs based on Dataset Type ---
+            input_ids = None
+            input_ids_2 = None
+            prompt_embeds_2 = None
+            clip_pooled = None
+            if args.dataset_type == "imagefolder":
+                # Image-only: Set text inputs to None, create placeholder pooled embeds
+                # Placeholder - Adjust shape/dtype as needed for FLUX! Check model config.
+                pooled_dim = getattr(transformer.config, 'projection_dim', 768) # Try to get from config, fallback
+                clip_pooled = torch.zeros(batch_size, pooled_dim, device=accelerator.device, dtype=weight_dtype)
+                logger.debug("Image-only batch detected. Using None for text inputs and placeholder for pooled embeds.")
+            else:
+                # Multimodal: Get text inputs from batch and encode
+                input_ids_batch = batch["input_ids"].to(accelerator.device) if "input_ids" in batch and batch["input_ids"] is not None else None
+                input_ids_2_batch = batch["input_ids_2"].to(accelerator.device) if "input_ids_2" in batch and batch["input_ids_2"] is not None else None
+
+                if input_ids_batch is not None and input_ids_2_batch is not None:
+                    input_ids = input_ids_batch # Assign to outer scope var
+                    input_ids_2 = input_ids_2_batch # Assign to outer scope var
+                    with torch.no_grad(): # Text encoding should not require gradients
+                        prompt_embeds_outputs = text_encoder(input_ids, output_hidden_states=True)
+                        clip_pooled = prompt_embeds_outputs.pooler_output
+                        prompt_embeds_2_outputs = text_encoder_2(input_ids_2, output_hidden_states=True)
+                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
+                    logger.debug("Encoded text inputs for multimodal batch.")
+                else:
+                     logger.warning("Missing text inputs for non-imagefolder dataset batch! Using placeholders.")
+                     # Handle error or create placeholders if appropriate
+                     pooled_dim = getattr(transformer.config, 'projection_dim', 768)
+                     clip_pooled = torch.zeros(batch_size, pooled_dim, device=accelerator.device, dtype=weight_dtype) # Placeholder
+                     # Keep text IDs/embeds as None
+
+            # --- VAE Encoding and Noise Addition (Common Logic) ---
             with accelerator.accumulate(transformer): # Use transformer here
                 # Encode pixel values -> latents using VAE
                 # VAE is prepared by accelerator, handles device/dtype internally via hooks/casting
@@ -563,58 +619,31 @@ def main(args):
                     logger.debug(f"Projected latents shape: {latents.shape}")
 
                 # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
-                bsz, channels, height, width = latents.shape
+                bsz, channels, height, width = latents.shape # Use bsz here, batch_size might be different due to accumulation
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
                 # Generate img_ids tensor based on latents_reshaped dimensions
-                batch_size = latents_reshaped.shape[0]
                 seq_len = latents_reshaped.shape[1]
-                img_ids = torch.arange(seq_len, device=latents.device).repeat(batch_size, 1)
-
-                # Encode text prompts if available
-                prompt_embeds_2 = None
-                clip_pooled = None
-                if input_ids is not None and input_ids_2 is not None:
-                    with torch.no_grad(): # Text encoding should not require gradients
-                        # CLIP Embeddings (for pooled output)
-                        prompt_embeds_outputs = text_encoder(input_ids, output_hidden_states=True)
-                        clip_pooled = prompt_embeds_outputs.pooler_output # We need this for pooled_projections
-
-                        # T5 Embeddings (for sequence output)
-                        prompt_embeds_2_outputs = text_encoder_2(input_ids_2, output_hidden_states=True)
-                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
-                else:
-                    # Handle image-only case: Need placeholder for pooled_projections
-                    # Get expected shape and dtype from transformer's perspective
-                    # This might require inspecting the model config or a dummy forward pass setup
-                    # For now, let's create a zero tensor with expected shape/dtype if possible
-                    # Example: Assuming pooled dim is 768 (CLIP default)
-                    # This part needs careful verification based on FLUX requirements for image-only
-                    logger.warning("Image-only dataset detected. Creating placeholder pooled_projections. Verify shape/dtype requirements.")
-                    # Placeholder - Adjust shape/dtype as needed for FLUX! Check model config.
-                    pooled_dim = 768 # Common CLIP pool dim, VERIFY FOR FLUX
-                    clip_pooled = torch.zeros(batch_size, pooled_dim, device=accelerator.device, dtype=weight_dtype)
-                    # For T5, encoder_hidden_states can likely be None, but check FLUX requirements
-                    prompt_embeds_2 = None # Assuming None is acceptable for T5 embeds in image-only
-                    # txt_ids should also be None
-                    input_ids_2 = None
-
+                img_ids = torch.arange(seq_len, device=latents.device).repeat(bsz, 1)
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
-                timesteps = torch.randint(0, train_noise_scheduler.config.num_train_timesteps, (batch_size,), device=latents_reshaped.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
                 timesteps = timesteps.long()
-                noisy_latents = train_noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
+                noisy_latents = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
 
-                # Log shapes before transformer call
+                # Log shapes before transformer call (using prepared variables)
                 logger.debug(f"Shape BEFORE transformer call - noisy_latents: {noisy_latents.shape}")
                 logger.debug(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
                 if prompt_embeds_2 is not None:
                     logger.debug(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
                 else:
                     logger.debug(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): None")
-                logger.debug(f"Shape BEFORE transformer call - pooled_projections (CLIP): {clip_pooled.shape}")
+                if clip_pooled is not None:
+                    logger.debug(f"Shape BEFORE transformer call - pooled_projections (CLIP): {clip_pooled.shape}")
+                else:
+                    logger.debug("Shape BEFORE transformer call - pooled_projections (CLIP): None") # Should have placeholder if img-only
                 if input_ids_2 is not None:
                     logger.debug(f"Shape BEFORE transformer call - txt_ids (T5): {input_ids_2.shape}")
                 else:
@@ -622,13 +651,13 @@ def main(args):
                 logger.debug(f"Shape BEFORE transformer call - img_ids: {img_ids.shape}")
 
                 # Predict the noise residual using the transformer model
-                # Use explicit keyword arguments for clarity and safety
+                # Pass the prepared conditional inputs (which might be None for text)
                 model_pred = transformer(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (can be None for img-only?)
-                    pooled_projections=clip_pooled, # CLIP pooled embeds (or placeholder)
-                    txt_ids=input_ids_2, # T5 IDs (can be None for img-only?)
+                    encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
+                    pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
+                    txt_ids=input_ids_2, # T5 IDs (None for img-only)
                     img_ids=img_ids,
                 ).sample
 
@@ -644,7 +673,6 @@ def main(args):
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     # Clip gradients if needed (helps prevent exploding gradients)
-                    # accelerator.clip_grad_norm_(params_to_optimize, 1.0)
                     params_needing_grad = [p for p in params_to_optimize if p.grad is not None]
                     if params_needing_grad:
                          accelerator.clip_grad_norm_(params_needing_grad, 1.0)
@@ -681,7 +709,7 @@ def main(args):
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
             progress_bar.set_postfix(**logs)
 
-            if global_step >= args.max_train_steps:
+            if global_step >= max_train_steps:
                 break
 
         # --- End of Training Steps for Epoch --- 
@@ -699,65 +727,64 @@ def main(args):
             for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
-                    pixel_values_val = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype)
-                    input_ids_val = val_batch["input_ids"].to(accelerator.device) if val_batch["input_ids"] is not None else None
-                    input_ids_2_val = val_batch["input_ids_2"].to(accelerator.device) if val_batch["input_ids_2"] is not None else None
+                    # Ensure pixel_values are on the correct device and dtype
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype)
 
                     # Encode pixel values -> latents
-                    latents = vae.encode(pixel_values_val).latent_dist.sample()
+                    # VAE is already on the correct device and dtype (float16)
+                    latents = vae.encode(pixel_values_device).latent_dist.sample()
                     logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
 
                     latents = latents * vae.config.scaling_factor
+                    latents = latents
 
                     # Apply projection layer if defined
                     logger.debug(f"Validation: Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
                     if vae_to_transformer_projection is not None:
-                        latents = vae_to_transformer_projection(latents)
+                        b, c, h, w = latents.shape
+                        if c != vae_latent_channels_actual:
+                            logger.error(f"PANIC: Validation Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
+                            raise ValueError(f"Unexpected validation latent channel dimension: {c}")
+                            
+                        latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
+                        projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
+                        latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
                         logger.debug(f"Validation: Projected latents shape: {latents.shape}")
-
+                        
                     # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
                     bsz_val, channels_val, height_val, width_val = latents.shape
                     latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
                     logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
                     # Generate img_ids for validation
+                    bsz_val = latents_reshaped_val.shape[0]
                     seq_len_val = latents_reshaped_val.shape[1]
                     img_ids_val = torch.arange(seq_len_val, device=latents.device).repeat(bsz_val, 1)
 
-                    # Encode prompts for validation batch if available
-                    prompt_embeds_2_val = None
-                    clip_pooled_val = None
-                    if input_ids_val is not None and input_ids_2_val is not None:
-                        with torch.no_grad():
-                            # CLIP Embeddings
-                            prompt_embeds_outputs_val = text_encoder(input_ids_val, output_hidden_states=True)
-                            clip_pooled_val = prompt_embeds_outputs_val.pooler_output
+                    # Encode prompts for validation batch
+                    with torch.no_grad():
+                        # CLIP Embeddings
+                        prompt_embeds_outputs = text_encoder(val_batch["input_ids"], output_hidden_states=True)
+                        prompt_embeds = prompt_embeds_outputs.last_hidden_state
+                        clip_pooled = prompt_embeds_outputs.pooler_output
 
-                            # T5 Embeddings
-                            prompt_embeds_2_outputs_val = text_encoder_2(input_ids_2_val, output_hidden_states=True)
-                            prompt_embeds_2_val = prompt_embeds_2_outputs_val.last_hidden_state
-                    else:
-                        # Placeholder for image-only validation
-                        logger.warning("Validation: Image-only dataset detected. Creating placeholder pooled_projections. Verify shape/dtype.")
-                        pooled_dim = 768 # VERIFY FOR FLUX
-                        clip_pooled_val = torch.zeros(bsz_val, pooled_dim, device=accelerator.device, dtype=weight_dtype)
-                        prompt_embeds_2_val = None
-                        input_ids_2_val = None
+                        # T5 Embeddings
+                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"], output_hidden_states=True)
+                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
 
                     # Sample noise and timesteps for validation
-                    noise = torch.randn_like(latents_reshaped_val)
-                    timesteps = torch.randint(0, train_noise_scheduler.config.num_train_timesteps, (bsz_val,), device=latents_reshaped_val.device)
+                    noise = torch.randn_like(latents)
+                    bsz = latents.shape[0]
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                     timesteps = timesteps.long()
-                    noisy_latents_val = train_noise_scheduler.add_noise(latents_reshaped_val, noise, timesteps)
 
                     # Predict noise using the model
                     model_pred_val = transformer(
-                        hidden_states=noisy_latents_val,
+                        latents_reshaped_val,
                         timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds_2_val,
-                        pooled_projections=clip_pooled_val,
-                        txt_ids=input_ids_2_val,
-                        img_ids=img_ids_val,
+                        encoder_hidden_states=prompt_embeds_2,
+                        txt_ids=val_batch["input_ids_2"], # Re-added T5 token IDs
+                        img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
 
                     # Assume target is noise for validation loss calculation
@@ -814,7 +841,7 @@ def main(args):
             # Log metrics to configured tracker (e.g., wandb)
             accelerator.log(log_metrics, step=global_step) # Log with global_step for finer granularity if needed
 
-        if global_step >= args.max_train_steps:
+        if global_step >= max_train_steps:
             logger.info("Reached max_train_steps. Stopping training.")
             break
 
