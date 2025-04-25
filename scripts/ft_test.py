@@ -605,11 +605,7 @@ def main(args):
     # --- Filter out invalid examples after preprocessing --- #
     def is_valid(example):
         # Only keep rows with non-empty image tensors
-        pv = example["pixel_values"]
-        # AFTER
-        valid = pv is not None        # we only need to know the image wasn't dropped   
-        if not valid:
-            logger.warning(f"Filtered out example: pixel_values={type(pv)}, shape={getattr(pv, 'shape', None)}, input_ids_2={type(example.get('input_ids_2', None))}")
+        valid = example["pixel_values"] is not None        # we only need to know the image wasn't dropped   
         return valid
 
     before_count = len(processed_dataset)
