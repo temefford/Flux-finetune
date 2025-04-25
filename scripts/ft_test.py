@@ -638,9 +638,12 @@ def main(args):
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
                     hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
-                    timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
+                    timestep=timesteps.to(accelerator.device),         # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
-                    pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
+                    txt_pooled=clip_pooled.to(accelerator.device),         # CLIP pooled embeddings
+                    img_ids=None,                                   # Image patch IDs (spatial) - None for T2I
+                    txt_ids=None,                                   # Text token IDs (T5) - Usually handled by encoder_hidden_states
+                    img_pooled=None,                                # Pooled image embeddings - None for T2I
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -762,7 +765,10 @@ def main(args):
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
-                        pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
+                        txt_pooled=clip_pooled.to(accelerator.device),         # CLIP pooled embeddings
+                        img_ids=None,                                   # Image patch IDs (spatial) - None for T2I
+                        txt_ids=None,                                   # Text token IDs (T5) - Usually handled by encoder_hidden_states
+                        img_pooled=None,                                # Pooled image embeddings - None for T2I
                     ).sample
 
                     # Assume target is noise for validation loss calculation
