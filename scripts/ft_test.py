@@ -51,6 +51,7 @@ def parse_args():
     parser.add_argument("--checkpoints_total_limit", type=int, default=None, help="Maximum number of checkpoints to keep.")
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging and potentially slower operations.")
+    parser.add_argument("--gradient_accumulation_steps", type=int, default=1, help="Number of updates steps to accumulate before performing a backward/update pass.")
     parser.add_argument("--text_ids_json_path", type=str, default=None, help="Optional path to a JSON file mapping image hashes to text_ids.")
     parser.add_argument("--text_ids_column", type=str, default=None, help="Column name for text_ids if using --text_ids_json_path.")
 
