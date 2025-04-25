@@ -8,6 +8,7 @@ import datasets
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import torch.utils.data
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -473,14 +474,50 @@ def main(args):
 
     # Collate function
     def collate_fn(examples):
-        # preprocess_train returns lists of tensors/lists
-        # We stack them here
-        pixel_values = torch.stack([example["pixel_values"] for example in examples])
+        # Handle potential variations in pixel_values structure
+        pixel_values_to_stack = []
+        for i, example in enumerate(examples):
+            pv = example.get("pixel_values")
+            if isinstance(pv, torch.Tensor):
+                pixel_values_to_stack.append(pv)
+            elif isinstance(pv, list) and len(pv) == 1 and isinstance(pv[0], torch.Tensor):
+                # If it's a list containing a single tensor (possibly from map fn behavior)
+                pixel_values_to_stack.append(pv[0])
+            elif pv is None:
+                 logger.warning(f"Found None for pixel_values in example {i} during collation. Skipping.")
+                 # Decide how to handle None: skip example, raise error, use placeholder?
+                 # For now, let's try skipping, but this might cause batch size mismatches.
+                 # A better approach might be to ensure preprocess_train doesn't return None.
+                 continue # Or raise error
+            else:
+                # Log the unexpected type/structure
+                logger.error(f"Unexpected type or structure for pixel_values in example {i}: {type(pv)}")
+                if isinstance(pv, list):
+                    logger.error(f"  List length: {len(pv)}")
+                    if pv:
+                         logger.error(f"  First element type: {type(pv[0])}")
+                raise TypeError(f"Unexpected type for pixel_values in collate_fn: {type(pv)}")
+
+        if not pixel_values_to_stack:
+             if examples: # If input examples existed but all had invalid pixel_values
+                 raise ValueError("Could not extract any valid pixel_values tensors for stacking in collate_fn.")
+             else: # If input examples list was empty
+                 return {} # Return empty dict if no examples
+
+        # Stack the validated/extracted tensors
+        pixel_values = torch.stack(pixel_values_to_stack)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
         # Ensure input_ids_2 are correctly handled
         # preprocess_train returns a list of lists; convert each list back to a tensor
-        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples])
+        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples if example.get("pixel_values") is not None]) # Ensure we only take ids for valid images
+
+        # Check for batch size consistency if examples were skipped
+        if pixel_values.shape[0] != input_ids_2.shape[0]:
+            raise ValueError(
+                f"Batch size mismatch after collation: pixel_values has {pixel_values.shape[0]}, "
+                f"input_ids_2 has {input_ids_2.shape[0]}. This might be due to skipping examples with None pixel_values."
+            )
 
         return {
             "pixel_values": pixel_values,
