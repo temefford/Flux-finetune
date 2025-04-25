@@ -221,21 +221,49 @@ def transform_example(batch, dataset_abs_path, image_transforms, image_column, c
 
     # --- Construct the final batch dictionary --- #
     output_batch = {}
-    if not pixel_values_list or not input_ids_2_list: # Check if any item was processed successfully
-        logger.warning("No items processed successfully in the batch.")
-        # Return empty lists to signal failure to collate_fn
-        output_batch["pixel_values"] = []
-        output_batch["input_ids_2"] = []
-    else:
-        output_batch["pixel_values"] = pixel_values_list
-        output_batch["input_ids_2"] = input_ids_2_list
+    # Initialize with lists of Nones matching the input batch size
+    output_batch["pixel_values"] = [None] * batch_size
+    output_batch["input_ids_2"] = [None] * batch_size
+    # Conditionally initialize text_ids column only if it was requested
+    if text_id_map is not None:
+        output_batch["text_ids"] = [None] * batch_size
 
-    # Add text_ids only if they were processed for ALL successfully processed items
-    # This is a strict requirement for stacking in collate_fn
-    if len(text_ids_list) == len(valid_indices) and valid_indices: # Check if text_ids were found for all valid items
-        output_batch["text_ids"] = text_ids_list
-    elif text_ids_list: # Log if some text_ids were found but not all
-        logger.debug(f"Found text_ids for {len(text_ids_list)} items, but expected {len(valid_indices)}. Dropping text_ids for this batch.")
+    processed_count = 0
+    text_ids_processed_count = 0
+
+    # Fill the lists with actual data for successfully processed items
+    for idx, original_index in enumerate(valid_indices):
+        output_batch["pixel_values"][original_index] = pixel_values_list[idx]
+        output_batch["input_ids_2"][original_index] = input_ids_2_list[idx]
+        processed_count += 1
+        # Check if text_ids were processed for this valid item
+        # Ensure text_ids_list has an entry for this processed item
+        if text_id_map is not None and len(text_ids_list) > idx and text_ids_list[idx] is not None:
+             if "text_ids" in output_batch:
+                output_batch["text_ids"][original_index] = text_ids_list[idx]
+                text_ids_processed_count += 1
+
+    if processed_count == 0:
+        logger.warning("No items processed successfully in the batch.")
+        # The batch dictionary already contains lists of Nones
+
+    # Decide whether to keep the text_ids column in the output batch
+    # We only need it if the map was provided AND at least one ID was successfully processed.
+    keep_text_ids_col = text_id_map is not None and text_ids_processed_count > 0
+
+    if not keep_text_ids_col and "text_ids" in output_batch:
+        # Remove the column if no valid text IDs were found or if map wasn't provided.
+        # This prevents sending a column of all Nones downstream.
+        del output_batch["text_ids"]
+    elif text_id_map is not None and processed_count > 0 and text_ids_processed_count < processed_count:
+        # Log if some text_ids were found but not for all successfully processed items
+        logger.debug(f"Processed {text_ids_processed_count} text_ids out of {processed_count} successfully processed items. Missing items will have None.")
+
+    # Optional: Check if essential columns ended up being all None (should only happen if processed_count == 0)
+    # if all(v is None for v in output_batch["pixel_values"]):
+    #     logger.warning("pixel_values list contains only None after processing the batch.")
+    # if all(v is None for v in output_batch["input_ids_2"]):
+    #     logger.warning("input_ids_2 list contains only None after processing the batch.")
 
     return output_batch
 
