@@ -160,7 +160,7 @@ def preprocess_func(examples, **fn_kwargs):
     if not all([image_transforms, tokenizer, tokenizer_2, args]):
         raise ValueError("Missing required kwargs in preprocess_func (image_transforms, tokenizer, tokenizer_2, args)")
 
-    # 1. Load and Transform Images into a list of tensors
+    # 1. Load and Transform Images
     try:
         images = [image.convert("RGB") for image in examples[args.image_column]]
     except Exception as e:
@@ -168,40 +168,37 @@ def preprocess_func(examples, **fn_kwargs):
         logger.error(f"Example keys: {examples.keys()}")
         raise e # Or handle more gracefully
 
-    # Create a list of processed image tensors
-    pixel_values_list = [image_transforms(image) for image in images]
-    # Apply memory format and dtype to each tensor in the list (optional, can be done in collate_fn)
-    # pixel_values_list = [pv.to(memory_format=torch.contiguous_format).float() for pv in pixel_values_list]
+    # Stack images into a batch tensor
+    pixel_values = torch.stack([image_transforms(image) for image in images])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float() # Apply formatting here
 
-    # 2. Tokenize Captions (Handle 'imagefolder' case)
-    num_examples = len(images) # Use length of successfully loaded images
+    # 2. Tokenize Captions
+    num_examples = len(images)
     if args.dataset_type == "imagefolder":
-        # Generate dummy captions and add them directly to the examples dict (as list)
-        examples[args.caption_column] = ["" for _ in range(num_examples)]
-        captions_batch = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+        # Create dummy captions for this batch
+        dummy_captions = ["" for _ in range(num_examples)]
+        # Use a temporary dict for tokenization
+        temp_examples_for_tokenization = {args.caption_column: dummy_captions}
+        captions_batch = tokenize_captions((tokenizer, tokenizer_2), temp_examples_for_tokenization, text_column=args.caption_column)
     elif args.dataset_type == "hf_metadata":
         if args.caption_column not in examples:
             raise KeyError(f"Caption column '{args.caption_column}' missing for hf_metadata.")
+        # Pass the original examples dict directly
         captions_batch = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
     else:
         raise ValueError(f"Unsupported dataset type in preprocess_func: {args.dataset_type}")
 
-    # Split the batch tensors from tokenize_captions into lists
-    # Assuming tokenize_captions returns dict like {'input_ids': batch_tensor, ...}
-    input_ids_list = [ids for ids in captions_batch["input_ids"]]
-    input_ids_2_list = [ids for ids in captions_batch["input_ids_2"]]
-    attention_mask_list = [mask for mask in captions_batch["attention_mask"]]
-    attention_mask_2_list = [mask for mask in captions_batch["attention_mask_2"]]
+    # captions_batch already contains batch tensors from tokenize_captions
 
     # 3. VAE Encoding moved to training loop
 
-    # Return processed data as lists for map(batched=True)
+    # Return processed data as batch tensors
     return {
-        "pixel_values": pixel_values_list,
-        "input_ids": input_ids_list,
-        "input_ids_2": input_ids_2_list,
-        "attention_mask": attention_mask_list,
-        "attention_mask_2": attention_mask_2_list,
+        "pixel_values": pixel_values,
+        "input_ids": captions_batch["input_ids"],
+        "input_ids_2": captions_batch["input_ids_2"],
+        "attention_mask": captions_batch["attention_mask"],
+        "attention_mask_2": captions_batch["attention_mask_2"],
     }
 
 # --- Main Function ---
@@ -439,6 +436,9 @@ def main(args):
         remove_columns=train_dataset.column_names, # Re-add remove_columns
         fn_kwargs=preprocess_kwargs # Pass variables here
     )
+    train_dataset.set_format(type="torch", columns=["pixel_values", "input_ids", "input_ids_2", "attention_mask", "attention_mask_2"])
+    logger.info(f"Train dataset features after map+set_format: {train_dataset.features}") # Log features
+
     # Apply preprocessing to val dataset if it exists
     if val_dataset:
         logger.info("Preprocessing validation data...")
@@ -449,56 +449,14 @@ def main(args):
             remove_columns=val_dataset.column_names, # Re-add remove_columns
             fn_kwargs=preprocess_kwargs # Pass variables here too
         )
-
-    # collate_fn to handle image-only or image+text datasets
-    def collate_fn(examples):
-        # Filter out None examples (if any)
-        examples = [e for e in examples if e is not None]
-        if not examples:
-            return {}
-
-        # --- Debugging --- #
-        if examples:
-            first_example_pv = examples[0].get("pixel_values")
-            print(f"DEBUG collate_fn: Type of examples[0]['pixel_values']: {type(first_example_pv)}")
-            if isinstance(first_example_pv, torch.Tensor):
-                print(f"DEBUG collate_fn: Shape: {first_example_pv.shape}")
-            elif isinstance(first_example_pv, list):
-                print(f"DEBUG collate_fn: Length: {len(first_example_pv)}")
-                if first_example_pv:
-                    print(f"DEBUG collate_fn: Type of element 0: {type(first_example_pv[0])}")
-            else:
-                print(f"DEBUG collate_fn: Content: {first_example_pv}")
-        # --- End Debugging --- #
-
-        # Access the tensor directly (assuming remove_columns fix worked)
-        pixel_values = torch.stack([example["pixel_values"] for example in examples])
-        pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-        # Handle text data (input_ids, attention_mask, etc.)
-        # Check if text keys exist in the first example before stacking
-        batch = {"pixel_values": pixel_values}
-        if "input_ids" in examples[0]:
-            input_ids = torch.stack([example["input_ids"] for example in examples])
-            batch["input_ids"] = input_ids
-        if "input_ids_2" in examples[0]:
-            input_ids_2 = torch.stack([example["input_ids_2"] for example in examples])
-            batch["input_ids_2"] = input_ids_2
-        if "attention_mask" in examples[0]:
-            attention_mask = torch.stack([example["attention_mask"] for example in examples])
-            batch["attention_mask"] = attention_mask
-        if "attention_mask_2" in examples[0]:
-            attention_mask_2 = torch.stack([example["attention_mask_2"] for example in examples])
-            batch["attention_mask_2"] = attention_mask_2
-
-        return batch
+        val_dataset.set_format(type="torch", columns=["pixel_values", "input_ids", "input_ids_2", "attention_mask", "attention_mask_2"])
+        logger.info(f"Validation dataset features after map+set_format: {val_dataset.features}") # Log features
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
-        collate_fn=collate_fn,
         batch_size=args.batch_size,
-        num_workers=args.dataloader_num_workers, # Use arg for num_workers
+        num_workers=args.dataloader_num_workers,
     )
 
     # Create validation dataloader if val_dataset exists
@@ -508,7 +466,6 @@ def main(args):
         val_dataloader = torch.utils.data.DataLoader(
             val_dataset,
             shuffle=False, # No need to shuffle validation data
-            collate_fn=collate_fn,
             batch_size=args.validation_batch_size, # Use specific validation batch size from args
             num_workers=args.dataloader_num_workers,
         )
