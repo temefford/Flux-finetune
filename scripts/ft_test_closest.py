@@ -30,14 +30,24 @@ import traceback
 ###############################################################################
 # helper: build txt-position ids that have the same width as img_ids
 ###############################################################################
-def make_txt_ids(img_ids: torch.Tensor) -> torch.LongTensor:
-    """
-    Given `img_ids` of shape (B , W) return a LongTensor of the same shape
-    that simply contains 0..W-1 repeated for each batch element.
-    """
-    seq_len = img_ids.shape[1]
-    base    = torch.arange(seq_len, device=img_ids.device)
-    return base.unsqueeze(0).repeat(img_ids.shape[0], 1)  # (B , W)
+def make_img_ids(b, h, w, device):
+    """Return (B, h*w, 3) tensor with z=0, y, x indices."""
+    y, x = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij"
+    )
+    # z-axis is unused during 2-D training → fill with zeros
+    z = torch.zeros_like(y)
+    grid = torch.stack((z, y, x), dim=-1).view(-1, 3)      # (h*w, 3)
+    return grid.unsqueeze(0).repeat(b, 1, 1)               # (B, h*w, 3)
+
+def make_txt_ids(seq_len, device):
+    """Return (1, T, 3) tensor with x-position in the first column."""
+    x = torch.arange(seq_len, device=device)
+    z = y = torch.zeros_like(x)
+    txt = torch.stack((z, y, x), dim=-1)                   # (T, 3)
+    return txt.unsqueeze(0)   
 
 
 # --- Argument Parsing ---
@@ -894,8 +904,8 @@ def main(args):
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
-                img_ids = torch.arange(height * width, device=latents.device).unsqueeze(0).repeat(bsz, 1)
-                txt_ids = make_txt_ids(img_ids)
+                img_ids = make_img_ids(bsz, height, width, latents.device)
+                txt_ids = make_txt_ids(prompt_embeds_2.shape[1], latents.device)
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
@@ -1041,8 +1051,8 @@ def main(args):
                         latents_val = vae_to_transformer_projection(latents_val)
                     bsz_val, c_val, h_val, w_val = latents_val.shape
                     latents_reshaped_val = latents_val.permute(0, 2, 3, 1).reshape(bsz_val, h_val * w_val, c_val)
-                    img_ids_val = torch.arange(h_val * w_val, device=latents_val.device).unsqueeze(0).repeat(bsz_val, 1)
-                    txt_ids_val = make_txt_ids(img_ids_val)
+                    img_ids_val = make_img_ids(bsz_val, h_val, w_val, latents_val.device)
+                    txt_ids_val = make_txt_ids(prompt_embeds_2.shape[1], latents_val.device)
                     logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
 
                     # Sample noise and timesteps for validation
