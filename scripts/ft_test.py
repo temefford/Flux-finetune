@@ -638,9 +638,48 @@ def main(args):
                 else:
                      logger.warning("Missing text inputs for non-imagefolder dataset batch! Using placeholders.")
                      # Handle error or create placeholders if appropriate
-                     pooled_dim = getattr(transformer.config, 'projection_dim', 768)
-                     clip_pooled = torch.zeros(batch_size, pooled_dim, device=accelerator.device, dtype=weight_dtype) # Placeholder
+                     clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
+                     clip_pooled = torch.zeros(batch_size, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
                      # Keep text IDs/embeds as None
+
+            # --- Handle Missing Conditioning Inputs (Create Placeholders) --- #
+            # Get expected embedding dimensions and null sequence length
+            t5_embed_dim = getattr(transformer.config, 'cross_attention_dim', transformer.config.joint_attention_dim) # e.g., 4096
+            clip_embed_dim = text_encoder.config.projection_dim # e.g., 1280
+            null_sequence_length = 1 # Minimal length for null sequences
+
+            # Create null T5 embeddings if needed
+            if prompt_embeds_2 is None:
+                prompt_embeds_2 = torch.zeros(
+                    batch_size, null_sequence_length, t5_embed_dim,
+                    dtype=weight_dtype, device=accelerator.device
+                )
+                logger.debug(f"Created null T5 embeds: {prompt_embeds_2.shape}")
+            else:
+                prompt_embeds_2 = prompt_embeds_2.to(dtype=weight_dtype)
+
+            # Create null CLIP pooled projections if needed
+            if clip_pooled is None:
+                clip_pooled = torch.zeros(
+                    batch_size, clip_embed_dim,
+                    dtype=weight_dtype, device=accelerator.device
+                )
+                logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
+            else:
+                clip_pooled = clip_pooled.to(dtype=weight_dtype)
+
+            # Create null T5 input IDs if needed
+            if input_ids_2 is None:
+                t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') and tokenizer_2.pad_token_id is not None else 0
+                input_ids_2 = torch.full(
+                    (batch_size, null_sequence_length),
+                    fill_value=t5_pad_token_id,
+                    dtype=torch.long, device=accelerator.device
+                )
+                logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
+            else:
+                input_ids_2 = input_ids_2.long()
+            # --- End Unconditional Handling --- #
 
             # --- VAE Encoding and Noise Addition (Common Logic) ---
             with accelerator.accumulate(transformer): # Use transformer here
@@ -673,40 +712,14 @@ def main(args):
                 timesteps = timesteps.long()
                 noisy_latents = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
 
-                # --- Handle Unconditional Training (Missing Text Embeddings) --- #
-                # Check if text conditioning inputs are present in the batch
-                batch_prompt_embeds_2 = batch.get("prompt_embeds_2", None)
-                batch_clip_pooled = batch.get("pooled_prompt_embeds", None) # Key is 'pooled_prompt_embeds' in batch
-                batch_input_ids_2 = batch.get("input_ids_2", None)
-
-                # Get expected embedding dimensions
-                t5_embed_dim = getattr(transformer.config, 'cross_attention_dim', transformer.config.joint_attention_dim) # e.g., 4096
-                clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
-                null_sequence_length = 1 # Define a minimal length for null sequences
-
-                # Cast text inputs if they exist
-                if batch_prompt_embeds_2 is not None:
-                    batch_prompt_embeds_2 = batch_prompt_embeds_2.to(dtype=weight_dtype)
-                if batch_clip_pooled is not None:
-                    batch_clip_pooled = batch_clip_pooled.to(dtype=weight_dtype)
-                if batch_input_ids_2 is not None:
-                    batch_input_ids_2 = batch_input_ids_2.long() # Ensure Long type for IDs
-
-                clip_embed_dim = text_encoder.config.projection_dim # Required for placeholder
-                if batch_clip_pooled is None:
-                    batch_clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.debug(f"Created null pooled_prompt_embeds with shape: {batch_clip_pooled.shape}")
-                else:
-                    batch_clip_pooled = batch_clip_pooled.to(dtype=weight_dtype)
-
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
                 model_pred = transformer(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=batch_prompt_embeds_2, # T5 sequence embeds (None for img-only)
-                    pooled_projections=batch_clip_pooled, # CLIP pooled embeds (placeholder for img-only)
-                    txt_ids=batch_input_ids_2, # T5 IDs (None for img-only)
+                    encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
+                    pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
+                    txt_ids=input_ids_2, # T5 IDs (None for img-only)
                     img_ids=img_ids,
                 ).sample
 
