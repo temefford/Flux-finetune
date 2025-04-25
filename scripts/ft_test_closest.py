@@ -41,12 +41,15 @@ def make_img_ids(b: int, h: int, w: int, device):
     grid = torch.stack((z, y, x), dim=-1).view(1, -1, 3)   # (1, H*W, 3)
     return grid.repeat(b, 1, 1)                            # (B, H*W, 3)
 
-def make_txt_ids(seq_len: int, device):
-    """(1, T, 3) — the batch dimension is kept at 1 on purpose;  
-       transformer_flux expands it to (B,T,3) internally."""
-    x = torch.arange(seq_len, device=device)
-    txt = torch.stack((torch.zeros_like(x), torch.zeros_like(x), x), dim=-1)
-    return txt.unsqueeze(0)  
+def make_txt_ids(h: int, w: int, device):
+    """
+    Return (1, H*W, 3) so that txt_ids and img_ids have identical
+    token-dimension and can be concatenated on dim 0.
+    """
+    n = h * w
+    x = torch.arange(n, device=device)
+    z = y = torch.zeros_like(x)
+    return torch.stack((z, y, x), dim=-1).unsqueeze(0)     # (1, H*W, 3)
 
 
 # --- Argument Parsing ---
@@ -905,7 +908,7 @@ def main(args):
 
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
                 img_ids = make_img_ids(bsz, height, width, latents.device)   # (B, H*W, 3)
-                txt_ids = make_txt_ids(prompt_embeds_2.size(1), latents.device)  # (1, T, 3)
+                txt_ids = make_txt_ids(height, width, latents.device)      # (1, H*W, 3)
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
