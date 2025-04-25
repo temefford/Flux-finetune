@@ -10,7 +10,6 @@ import diffusers
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import torch.nn as nn
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -703,11 +702,16 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
-                # --- Revert img_ids to arange --- 
-                # Generate img_ids tensor based on latents_reshaped dimensions, mimicking internal transformer logic
+                # --- Prepare img_ids and potentially matching txt_ids placeholder --- 
                 seq_len = latents_reshaped.shape[1]
                 img_ids = torch.arange(seq_len, device=latents.device).repeat(bsz, 1)
                 logger.debug(f"Using arange-based img_ids: {img_ids.shape}")
+
+                # Handle case where 'caption' is not in the batch (image-only dataset)
+                if input_ids_2 is None:
+                    # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
+                    input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
+                    logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
@@ -827,10 +831,18 @@ def main(args):
                     latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
                     logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
-                    # --- Revert img_ids to arange (Validation) --- 
+                    # --- Prepare img_ids and potentially matching txt_ids placeholder --- 
                     seq_len_val = latents_reshaped_val.shape[1]
                     img_ids_val = torch.arange(seq_len_val, device=latents.device).repeat(bsz_val, 1)
                     logger.debug(f"Using arange-based img_ids_val: {img_ids_val.shape}")
+
+                    # Handle case where 'caption' is not in the batch (image-only dataset)
+                    if 'input_ids_2' not in val_batch or val_batch['input_ids_2'] is None:
+                        # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
+                        input_ids_2 = torch.zeros(bsz_val, seq_len_val, dtype=torch.long, device=accelerator.device)
+                        logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
+                    else:
+                        input_ids_2 = val_batch['input_ids_2'].to(accelerator.device)
 
                     # Encode prompts for validation batch
                     with torch.no_grad():
@@ -840,21 +852,21 @@ def main(args):
                         clip_pooled = prompt_embeds_outputs.pooler_output
 
                         # T5 Embeddings
-                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"], output_hidden_states=True)
+                        prompt_embeds_2_outputs = text_encoder_2(input_ids_2, output_hidden_states=True)
                         prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
 
                     # Sample noise and timesteps for validation
-                    noise = torch.randn_like(latents)
+                    noise = torch.randn_like(latents_reshaped_val)
                     bsz = latents.shape[0]
                     timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                     timesteps = timesteps.long()
 
                     # Predict noise using the model
                     model_pred_val = transformer(
-                        latents_reshaped_val,
+                        hidden_states=latents_reshaped_val,
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
-                        txt_ids=val_batch["input_ids_2"], # Re-added T5 token IDs
+                        txt_ids=input_ids_2, # Re-added T5 token IDs
                         img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
 
@@ -955,6 +967,17 @@ def main(args):
     end_time = time.time()
     total_duration = end_time - training_start_time
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
+
+def log_transformer_inputs(logger, hidden_states, timestep, encoder_hidden_states, pooled_projections, txt_ids, img_ids, prefix="Training"):
+    logger.debug(f"--- {prefix} Transformer Inputs ---")
+    logger.debug(f"  hidden_states shape: {hidden_states.shape}")
+    logger.debug(f"  timestep shape: {timestep.shape}")
+    logger.debug(f"  encoder_hidden_states type: {type(encoder_hidden_states)}")
+    logger.debug(f"  encoder_hidden_states shape: {encoder_hidden_states.shape if encoder_hidden_states is not None else 'None'}")
+    logger.debug(f"  pooled_projections shape: {pooled_projections.shape}")
+    logger.debug(f"  txt_ids type: {type(txt_ids)}")
+    logger.debug(f"  txt_ids shape: {txt_ids.shape if txt_ids is not None else 'None'}")
+    logger.debug(f"  img_ids shape: {img_ids.shape}")
 
 if __name__ == "__main__":
     # Configuration loading and argument parsing are now handled within parse_args
