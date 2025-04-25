@@ -291,7 +291,6 @@ def main(args):
     log_level = logging.DEBUG
     log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     logging.basicConfig(level=log_level, format=log_format)
-    logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
     # ========================
 
     # Initialize Accelerator
@@ -305,10 +304,14 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # === Log Logging Level (After Accelerator Init) ===
+    logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
+    # ===================================================
+
     accelerator.print(f"DEBUG: Effective args.data_dir after parsing: {args.data_dir}")
 
     # Make one log on every process with the configuration for debugging.
-    accelerator.print(f"Accelerator state: {accelerator.state}")
+    # logger.info(accelerator.state, main_process_only=False)
 
     if args.seed is not None:
         set_seed(args.seed)
