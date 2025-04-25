@@ -583,6 +583,7 @@ def main(args):
         try:
             logger.info(f"First raw example: {dataset[0]}")
         except Exception as e:
+            pass
     # Debug: Print first preprocessed example before filtering
     try:
         logger.info(f"First preprocessed example: {processed_dataset[0]}")
