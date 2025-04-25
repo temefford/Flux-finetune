@@ -593,6 +593,10 @@ def main(args):
             remove_columns=list(set(original_columns) - columns_to_keep),
             desc="Running tokenizer on train dataset",
         )
+        processed_dataset = processed_dataset.with_format(
+            type="torch",
+            columns=["pixel_values", "input_ids_2"],
+        )
     elif args.dataset_type == "imagefolder":
         dataset = load_dataset("imagefolder", data_dir=args.dataset_path, split="train")
         # Debug: Print first raw example and columns
@@ -608,9 +612,14 @@ def main(args):
 
     # --- Filter out invalid examples after preprocessing --- #
     def is_valid(example):
-        # Only keep rows with non-empty image tensors
-        valid = example["pixel_values"] is not None        # we only need to know the image wasn't dropped   
-        return valid
+        pv = example["pixel_values"]
+        if pv is None:
+            return False
+        # accept torch tensors *or* nested lists/arrays with at least 3 dims
+        if isinstance(pv, torch.Tensor):
+            return pv.ndim >= 3
+        # treat lists as (C,H,W) flattened into one dimension per Arrow row
+        return isinstance(pv, (list, tuple)) and len(pv) > 0    
 
     before_count = len(processed_dataset)
     logger.info(f"First 5 examples before filtering: {[processed_dataset[i] for i in range(min(5, before_count))]}")
