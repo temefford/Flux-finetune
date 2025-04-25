@@ -328,13 +328,9 @@ def main(args):
 
     # Now initialize logger after Accelerator (accelerate state) is ready
     global logger
-    from accelerate.logging import get_logger
     logger = get_logger(__name__)
     logger.info(f"Logging level set to {logging.getLevelName(level)}")
     # ========================
-    # === Log Logging Level (After Accelerator Init) ===
-    logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
-    # ===================================================
 
     accelerator.print(f"DEBUG: Effective args.dataset_path after parsing: {args.dataset_path}")
 
