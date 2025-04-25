@@ -178,15 +178,12 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                 img_path = image_paths[img_idx]
                 try:
                     individual_input = image_transforms([img_to_process]) # Process as a batch of 1
-                    logger.debug(f"Fallback - image_transforms output: type={type(individual_input)}, value={individual_input}")
-                    logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
 
                     # Handle direct tensor output or dictionary output
                     pv_individual = None
                     if isinstance(individual_input, torch.Tensor):
                         # If image_transforms returns a tensor directly
                         pv_individual = individual_input.squeeze(0) # Assume it might still have a batch dim of 1
-                        logger.debug(f"Fallback - Handled direct tensor output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
                     elif isinstance(individual_input, dict) and 'pixel_values' in individual_input:
                         # If image_transforms returns a dict (original expectation)
                         pv_maybe_numpy_or_tensor = individual_input['pixel_values']
@@ -197,13 +194,12 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                         else:
                             logger.warning(f"Fallback - Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)}")
                         if pv_individual is not None:
-                             logger.debug(f"Fallback - Handled dict output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
-                    else:
-                        logger.error(f"Fallback - Unexpected output type from image_transforms: {type(individual_input)}")
+                            pass
+                        else:
+                            logger.error(f"Fallback - Unexpected output type from image_transforms: {type(individual_input)}")
 
                     if pv_individual is not None:
                         processed_individual_tensors[img_idx] = pv_individual
-                        logger.debug(f"Successfully processed fallback image {os.path.basename(img_path)}")
                     else:
                          logger.warning(f"Fallback - Failed to extract tensor for image {os.path.basename(img_path)}")
 
