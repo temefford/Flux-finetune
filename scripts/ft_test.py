@@ -160,14 +160,19 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         try:
             # Attempt batch processing first
             image_inputs = image_transforms(valid_images)
-            pixel_values_maybe_numpy = image_inputs['pixel_values']
-
-            if isinstance(pixel_values_maybe_numpy, np.ndarray):
-                pixel_values_valid_tensor = torch.from_numpy(pixel_values_maybe_numpy)
-            elif isinstance(pixel_values_maybe_numpy, torch.Tensor):
-                pixel_values_valid_tensor = pixel_values_maybe_numpy
+            logger.debug(f"Type of image_inputs: {type(image_inputs)}")
+            if isinstance(image_inputs, dict) and 'pixel_values' in image_inputs:
+                pixel_values_maybe_numpy = image_inputs['pixel_values']
+                logger.debug(f"Type of pixel_values_maybe_numpy: {type(pixel_values_maybe_numpy)}; Shape: {getattr(pixel_values_maybe_numpy, 'shape', None)}")
+                if isinstance(pixel_values_maybe_numpy, np.ndarray):
+                    pixel_values_valid_tensor = torch.from_numpy(pixel_values_maybe_numpy)
+                elif isinstance(pixel_values_maybe_numpy, torch.Tensor):
+                    pixel_values_valid_tensor = pixel_values_maybe_numpy
+                else:
+                    raise TypeError(f"Unexpected type from batch image processor: {type(pixel_values_maybe_numpy)}")
             else:
-                raise TypeError(f"Unexpected type from batch image processor: {type(pixel_values_maybe_numpy)}")
+                logger.warning(f"image_inputs did not contain 'pixel_values' or was not a dict. Type: {type(image_inputs)}. Keys: {getattr(image_inputs, 'keys', lambda: None)()}.")
+                raise TypeError(f"image_inputs did not contain 'pixel_values' or was not a dict.")
 
         except IndexError as batch_ie:
             logger.warning(f"Batch image processing failed with IndexError: {batch_ie}. Falling back to individual processing to identify culprit(s).")
