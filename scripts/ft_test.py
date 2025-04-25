@@ -637,13 +637,13 @@ def main(args):
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
-                    hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
-                    timestep=timesteps.to(accelerator.device),         # Explicitly move timesteps
-                    encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
-                    txt_pooled=clip_pooled.to(accelerator.device),         # CLIP pooled embeddings
-                    img_ids=None,                                   # Image patch IDs (spatial) - None for T2I
-                    txt_ids=None,                                   # Text token IDs (T5) - Usually handled by encoder_hidden_states
-                    img_pooled=None,                                # Pooled image embeddings - None for T2I
+                    hidden_states=latents_reshaped.to(accelerator.device),
+                    timestep=timesteps.to(accelerator.device),
+                    encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
+                    txt_pooled=clip_pooled.to(accelerator.device),
+                    txt_ids=input_ids_2.to(accelerator.device),
+                    img_ids=None,
+                    img_pooled=None,
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -764,11 +764,11 @@ def main(args):
                     model_pred_val = transformer(
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
-                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
-                        txt_pooled=clip_pooled.to(accelerator.device),         # CLIP pooled embeddings
-                        img_ids=None,                                   # Image patch IDs (spatial) - None for T2I
-                        txt_ids=None,                                   # Text token IDs (T5) - Usually handled by encoder_hidden_states
-                        img_pooled=None,                                # Pooled image embeddings - None for T2I
+                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
+                        txt_pooled=clip_pooled.to(accelerator.device),
+                        txt_ids=val_batch["input_ids_2"].to(accelerator.device),
+                        img_ids=None,
+                        img_pooled=None,
                     ).sample
 
                     # Assume target is noise for validation loss calculation
@@ -860,7 +860,8 @@ def main(args):
             if hasattr(final_model, 'save_pretrained'):
                  final_model.save_pretrained(args.output_dir)
             else:
-                 torch.save(final_model.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
+                # Fallback or add specific logic if using a custom model structure
+                torch.save(final_model.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
         logger.info(f"Saved final LoRA weights (or full model) to {args.output_dir}")
 
     accelerator.end_training()
