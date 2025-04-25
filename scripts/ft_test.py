@@ -73,24 +73,27 @@ def parse_args():
     # Store the path to the config file itself if needed later
     args.config_path = cmd_args.config 
 
-    # Ensure dataset_path is populated from data_dir in config if it exists
-    if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
-        args.dataset_path = args.data_dir
-        print(f"INFO: Using data_dir '{args.data_dir}' from config as dataset_path.") # Use print
+    # Convert cmd_args Namespace to dict for easier iteration
+    cmd_args_dict = vars(cmd_args)
 
-    # Override specific keys if they were provided via command line
-    if cmd_args.data_dir:
-        args.dataset_path = cmd_args.data_dir # Override whatever was set from config
-        print(f"INFO: Overriding dataset_path with command-line value: {args.dataset_path}") # Use print
-    if cmd_args.output_dir:
-        args.output_dir = cmd_args.output_dir
-        print(f"INFO: Overriding output_dir with command-line value: {args.output_dir}") # Use print
-    if cmd_args.validation_split is not None: # Check if explicitly provided
-        args.validation_split = cmd_args.validation_split
-        print(f"INFO: Overriding validation_split with command-line value: {args.validation_split}") # Use print
-    if cmd_args.log_level:
-        args.log_level = cmd_args.log_level
-        print(f"INFO: Overriding log_level with command-line value: {args.log_level}") # Use print
+    # Override config values with any non-default command-line arguments
+    for key, value in cmd_args_dict.items():
+        # Skip the config file path itself
+        if key == 'config':
+            continue
+
+        # Check if the cmd arg value is different from the parser's default
+        # This handles None for paths, specific values, and boolean flags
+        default_value = parser.get_default(key)
+        if value != default_value:
+            print(f"INFO: Overriding '{key}' with command-line value: {value}") # Use print
+            setattr(args, key, value)
+
+    # --- Post-merge adjustments specific to certain args ---
+    # Use data_dir as dataset_path if dataset_path wasn't set by config or cmd line override
+    if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
+         args.dataset_path = args.data_dir
+         print(f"INFO: Setting dataset_path from data_dir: {args.dataset_path}")
 
     # --- Ensure essential args exist and perform adjustments --- #
     # Validate required args that might not have defaults
