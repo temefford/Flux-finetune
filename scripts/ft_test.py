@@ -179,6 +179,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                 img_path = image_paths[img_idx]
                 try:
                     individual_input = image_transforms([img_to_process]) # Process as a batch of 1
+                    logger.debug(f"Fallback - image_transforms output: type={type(individual_input)}, value={individual_input}")
                     logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
                     pv_individual_maybe_numpy = individual_input['pixel_values']
                     if isinstance(pv_individual_maybe_numpy, np.ndarray):
