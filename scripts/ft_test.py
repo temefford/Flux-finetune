@@ -458,7 +458,19 @@ def main(args):
 
     # collate_fn to handle image-only or image+text datasets
     def collate_fn(examples):
-        # Handle image data
+        # Filter out None examples (if any)
+        examples = [e for e in examples if e is not None]
+        if not examples:
+            return {}
+
+        # Debug: Check the type of pixel_values for the first example
+        if examples:
+            first_example_pv = examples[0].get("pixel_values")
+            print(f"DEBUG collate_fn: Type of pixel_values in first example: {type(first_example_pv)}")
+            # If it's a list, print its length and type of the first element
+            if isinstance(first_example_pv, list):
+                print(f"DEBUG collate_fn: Length={len(first_example_pv)}, Type of element 0: {type(first_example_pv[0]) if first_example_pv else 'Empty List'}")
+
         pixel_values = torch.stack([example["pixel_values"] for example in examples]) # No extra torch.tensor()
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
