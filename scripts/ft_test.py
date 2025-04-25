@@ -51,8 +51,8 @@ def parse_args():
 
     # --- Load Configuration from YAML --- #
     # --- Handle conflicting split flags ---
-    if hasattr(cmd_args, "val_split") and getattr(cmd_args, "validation_split", None) is not None:
-        raise ValueError("Specify only one of val_split or --validation_split")
+    if cmd_args.val_split is not None and cmd_args.validation_split is not None:
+        raise ValueError("Specify only one of val_split or validation_split")
     try:
         with open(cmd_args.config, 'r') as f:
             config = yaml.safe_load(f)
@@ -83,6 +83,8 @@ def parse_args():
     if cmd_args.validation_split is not None: # Check if explicitly provided
         args.validation_split = cmd_args.validation_split
         print(f"INFO: Overriding validation_split with command-line value: {args.validation_split}") # Use print
+    elif cmd_args.val_split is not None: 
+        args.validation_split = cmd_args.val_split
     if cmd_args.log_level:
         args.log_level = cmd_args.log_level
         print(f"INFO: Overriding log_level with command-line value: {args.log_level}") # Use print
@@ -268,10 +270,10 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
+            # AFTER   (no .tolist(), stays a Tensor)
             pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu()
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu()
+            input_ids_list[original_idx]    = input_ids_valid_tensor[valid_item_idx].cpu()
             valid_item_idx += 1
-
         # --- Return Lists for Dataset Map --- #
         return {                   # HF datasets will happily keep lists
             "pixel_values": pixel_values_list,
@@ -315,6 +317,8 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
 def main(args):
     # === Configure Logging ===
     # Set level to DEBUG to capture image property logs
+    torch.backends.cuda.matmul.allow_tf32 = True
+    torch.backends.cudnn.allow_tf32 = True
     log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     level = getattr(logging, getattr(args, "log_level", "INFO").upper(), logging.INFO)
     logging.basicConfig(level=level, format=log_format)
@@ -413,11 +417,15 @@ def main(args):
     # --- Add LoRA to transformer (UNet equivalent) ---
     if args.peft_method == "LoRA":
         logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
+        target_modules = (
+                ["to_q","to_k","to_v"] if hasattr(transformer, "to_q")
+                else ["q_proj","k_proj","v_proj"]
+            )
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
             # Use correct FLUX attention module names (to_q, to_k, to_v)
-            target_modules=["to_q", "to_k", "to_v"],
+            target_modules=target_modules,
             lora_dropout=0.1, # Optional dropout
             bias="none",
         )
@@ -596,7 +604,8 @@ def main(args):
     def is_valid(example):
         # Only keep rows with non-empty image tensors
         pv = example["pixel_values"]
-        valid = pv is not None and hasattr(pv, 'shape') and pv.shape[0] > 0
+        # AFTER
+        valid = isinstance(pv, torch.Tensor) and pv.ndim >= 3    # (C,H,W) or (H,W)
         if not valid:
             logger.warning(f"Filtered out example: pixel_values={type(pv)}, shape={getattr(pv, 'shape', None)}, input_ids_2={type(example.get('input_ids_2', None))}")
         return valid
@@ -637,8 +646,7 @@ def main(args):
         valid_examples = [ex for ex in examples if ex["pixel_values"] is not None]
 
         if not valid_examples:
-            logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
-            return []  # PyTorch >=2.1 skips batch if empty list; for <2.1, consider raising RuntimeError
+            return None
 
         try:
             batch = {
@@ -949,10 +957,7 @@ def main(args):
                 accelerator.backward(loss)
                 if accelerator.sync_gradients:
                     # Clip gradients if needed (helps prevent exploding gradients)
-                    params_needing_grad = [p for p in params_to_optimize if p.grad is not None]
-                    if params_needing_grad:
-                         accelerator.clip_grad_norm_(params_needing_grad, 1.0)
-
+                    accelerator.clip_grad_norm_(transformer.parameters(), 1.0)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
