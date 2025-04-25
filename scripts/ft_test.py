@@ -246,10 +246,6 @@ def preprocess_func(examples, **fn_kwargs):
 
 # --- Main Function ---
 def main(args):
-    # Configure logging
-    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
-    # Basic config first, Accelerator might reconfigure
-    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s') 
     logger = logging.getLogger(__name__)
 
     # Initialize Accelerator
