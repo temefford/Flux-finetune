@@ -4,7 +4,9 @@ model_id: "black-forest-labs/FLUX.1-schnell"
 peft_method: "LoRA"
 lora_rank: 16                # Rank for LoRA matrices (e.g., 4, 8, 16, 32)
 lora_dropout: 0.1           # Dropout probability for LoRA layers
-learning_rate: 1e-4            # Learning rate
+learning_rate: 1e-4            # Initial learning rate (after the potential warmup period)
+lr_scheduler: "constant"  # Type of learning rate schedule (e.g., "linear", "cosine", "constant")
+lr_warmup_steps: 0        # Number of steps for the warmup phase
 batch_size: 16                 # Per-device batch size (Adjust based on VRAM)
 gradient_accumulation_steps: 2 # Accumulate gradients (16 * 2 = effective batch size 32)
 epochs: 1                      # Number of training epochs
