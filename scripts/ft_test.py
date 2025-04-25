@@ -52,7 +52,7 @@ def parse_args():
     parser.add_argument("--resume_from_checkpoint", type=str, default=None, help="Path to checkpoint to resume training from.")
     parser.add_argument("--debug", action="store_true", help="Enable debug logging and potentially slower operations.")
     parser.add_argument("--text_ids_json_path", type=str, default=None, help="Optional path to a JSON file mapping image hashes to text_ids.")
-    parser.add_argument("--text_ids_column", type=str, default="text_ids", help="Column name for text_ids if using --text_ids_json_path.")
+    parser.add_argument("--text_ids_column", type=str, default=None, help="Column name for text_ids if using --text_ids_json_path.")
 
     cmd_args = parser.parse_args() # Parse command line args first
 
@@ -118,116 +118,126 @@ def parse_args():
     return args
 
 # --- New Transform Function for set_transform --- #
-def transform_example(example, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2, text_id_map=None):
+def transform_example(batch, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2, text_id_map=None):
     # Use the global logger instance configured in main
     logger = logging.getLogger(__name__)
 
-    # Get image path and caption
-    # --- Handle potential list values from DataLoader/set_transform --- >
-    image_hash_val = example.get(hash_column)
-    caption_val = example.get(caption_column)
+    # Determine batch size
+    # Get the list for one of the columns (e.g., hash_column or caption_column)
+    # Need to handle cases where hash or caption column might not be present
+    if hash_column and hash_column in batch:
+        batch_size = len(batch[hash_column])
+    elif caption_column and caption_column in batch:
+        batch_size = len(batch[caption_column])
+    else:
+        # Try to infer from another column, this is less robust
+        try:
+            first_key = list(batch.keys())[0]
+            batch_size = len(batch[first_key])
+        except (IndexError, TypeError):
+             logger.error("Could not determine batch size from input batch dictionary.")
+             # Return empty dictionary or raise error? Returning empty for now.
+             return {"pixel_values": [], "input_ids_2": [], "text_ids": []}
 
-    image_hash = image_hash_val[0] if isinstance(image_hash_val, list) and len(image_hash_val) > 0 else image_hash_val
-    caption = caption_val[0] if isinstance(caption_val, list) and len(caption_val) > 0 else caption_val
+    # Initialize lists to store processed outputs
+    pixel_values_list = []
+    input_ids_2_list = []
+    text_ids_list = []
+    valid_indices = [] # Keep track of indices that were processed successfully
 
-    # Ensure caption is a string after potential extraction, default to empty if None or invalid
-    if caption is None:
+    for i in range(batch_size):
+        image_hash = None
         caption = ""
-    elif not isinstance(caption, str):
-         logger.warning(f"Caption retrieved was not a string (type: {type(caption)}). Value: {repr(caption)}. Converting to string.")
-         caption = str(caption)
-    # <----------------------------------------------------
+        current_text_ids = None
 
-    # Ensure image_hash is a string after potential extraction
-    if not isinstance(image_hash, str):
-        logger.error(f"Processed image_hash is not a string (type: {type(image_hash)}). Value: {repr(image_hash)}. Original example: {example}. Skipping.")
-        return None
+        try:
+            # --- Extract data for the current item --- #
+            if hash_column and hash_column in batch:
+                image_hash = batch[hash_column][i]
+            if caption_column and caption_column in batch:
+                caption = batch[caption_column][i]
+                if caption is None:
+                    caption = ""
+                elif not isinstance(caption, str):
+                    caption = str(caption)
 
-    if not image_hash: # Check if it's an empty string after processing
-        logger.warning(f"Missing or empty value for hash_column ('{hash_column}') after processing example: {example}. Skipping.")
-        return None
+            # Basic validation
+            if not isinstance(image_hash, str) or not image_hash:
+                logger.warning(f"Invalid or missing image hash at index {i} (value: {repr(image_hash)}). Skipping item.")
+                continue
 
-    path = os.path.join(dataset_abs_path, image_hash + ".jpg") # Assuming jpg
+            # --- Process the single item --- #
+            path = os.path.join(dataset_abs_path, image_hash + ".jpg") # Assuming jpg
 
-    pixel_values = None
-    input_ids_2 = None
-    text_ids = None # Optional
+            # 1. Load Image
+            image = Image.open(path).convert("RGB")
 
-    try:
-        # 1. Load Image
-        img = Image.open(path).convert("RGB")
-        # logger.debug(f"Loaded image {os.path.basename(path)}: Mode={img.mode}, Size={img.size}, Format={img.format}") # Can be verbose
+            # 2. Apply Image Transformations (as a batch of 1)
+            image_input_dict = image_transforms([image])
+            pixel_values_tensor = image_input_dict['pixel_values']
+            if isinstance(pixel_values_tensor, np.ndarray):
+                pixel_values_tensor = torch.from_numpy(pixel_values_tensor)
+            pixel_values_tensor = pixel_values_tensor.squeeze(0) # Remove batch dim
 
-        # 2. Process Image (apply transforms)
-        image_input = image_transforms(img) # Process single image
+            # 3. Tokenize Caption
+            max_len = getattr(tokenizer_2, 'model_max_length', 512)
+            text_input_dict = tokenizer_2(
+                caption, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+            )
+            input_ids_2_tensor = text_input_dict['input_ids'].squeeze(0) # Remove batch dimension
 
-        if isinstance(image_input, torch.Tensor):
-            pixel_values = image_input
-        elif isinstance(image_input, dict) and 'pixel_values' in image_input:
-             pv_maybe_numpy_or_tensor = image_input['pixel_values']
-             if isinstance(pv_maybe_numpy_or_tensor, np.ndarray):
-                 pixel_values = torch.from_numpy(pv_maybe_numpy_or_tensor)
-             elif isinstance(pv_maybe_numpy_or_tensor, torch.Tensor):
-                  pixel_values = pv_maybe_numpy_or_tensor
-             else:
-                  logger.warning(f"Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)} for {path}")
-        else:
-             logger.error(f"Unexpected output type from image_transforms: {type(image_input)} for {path}")
+            # 4. Get Text IDs (optional)
+            if text_id_map is not None:
+                text_ids_val = text_id_map.get(image_hash, None)
+                if text_ids_val is not None:
+                    try:
+                        if isinstance(text_ids_val, (int, float)):
+                            current_text_ids = torch.tensor([text_ids_val], dtype=torch.long)
+                        elif isinstance(text_ids_val, list):
+                            current_text_ids = torch.tensor(text_ids_val, dtype=torch.long)
+                        # Add handling for tensor if needed
+                        # elif isinstance(text_ids_val, torch.Tensor):
+                        #     current_text_ids = text_ids_val.to(dtype=torch.long)
+                        else:
+                            logger.warning(f"Unsupported type for text_ids_val {type(text_ids_val)} for hash {image_hash}. Skipping text_ids.")
+                    except Exception as e:
+                         logger.error(f"Error converting text_ids '{text_ids_val}' for hash {image_hash}: {e}. Skipping.")
+            # If lookup failed or map is None, current_text_ids remains None
 
-        if pixel_values is not None and not isinstance(pixel_values, torch.Tensor):
-             try:
-                 # Ensure conversion to float32, common for image tensors
-                 pixel_values = torch.tensor(pixel_values, dtype=torch.float32)
-             except Exception as convert_err:
-                 logger.error(f"Failed convert pixel_values (type: {type(pixel_values)}) to tensor: {convert_err} for {path}. Setting to None.")
-                 pixel_values = None
+            # --- Append successful results --- #
+            pixel_values_list.append(pixel_values_tensor)
+            input_ids_2_list.append(input_ids_2_tensor)
+            # Only append text_ids if they were successfully processed
+            if current_text_ids is not None:
+                 text_ids_list.append(current_text_ids)
+            # Keep track of successful index
+            valid_indices.append(i)
 
-        if pixel_values is None:
-             # logger.warning(f"Failed to get valid pixel_values tensor for {path}. Skipping example.")
-             return None # Signal to collate_fn to skip
+        except FileNotFoundError:
+            logger.warning(f"Image file not found for hash {image_hash} at index {i}: {path}. Skipping item.")
+        except Exception as e:
+            logger.error(f"Error processing item at index {i} (hash: {image_hash}): {e}", exc_info=True)
+            # Continue to next item in batch
 
+    # --- Construct the final batch dictionary --- #
+    output_batch = {}
+    if not pixel_values_list or not input_ids_2_list: # Check if any item was processed successfully
+        logger.warning("No items processed successfully in the batch.")
+        # Return empty lists to signal failure to collate_fn
+        output_batch["pixel_values"] = []
+        output_batch["input_ids_2"] = []
+    else:
+        output_batch["pixel_values"] = pixel_values_list
+        output_batch["input_ids_2"] = input_ids_2_list
 
-        # 3. Process Text (tokenize caption)
-        max_len = getattr(tokenizer_2, 'model_max_length', 512)
-        text_inputs = tokenizer_2(
-            caption, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
-        )
-        input_ids_2 = text_inputs['input_ids'].squeeze(0) # Remove batch dim -> [SeqLen]
+    # Add text_ids only if they were processed for ALL successfully processed items
+    # This is a strict requirement for stacking in collate_fn
+    if len(text_ids_list) == len(valid_indices) and valid_indices: # Check if text_ids were found for all valid items
+        output_batch["text_ids"] = text_ids_list
+    elif text_ids_list: # Log if some text_ids were found but not all
+        logger.debug(f"Found text_ids for {len(text_ids_list)} items, but expected {len(valid_indices)}. Dropping text_ids for this batch.")
 
-        # 4. Get Text IDs (optional)
-        if text_id_map is not None and hash_column in example:
-            # Use the potentially processed image_hash variable
-            text_ids_val = text_id_map.get(image_hash, None)
-            if text_ids_val is not None:
-                # Assuming text_ids need conversion to tensor
-                try:
-                     text_ids = torch.tensor(text_ids_val, dtype=torch.long)
-                except Exception:
-                     logger.warning(f"Could not convert text_ids to tensor for {path}")
-                     text_ids = None
-
-
-    except FileNotFoundError:
-        # logger.warning(f"Image file not found: {path}. Skipping example.")
-        return None # Signal to collate_fn to skip
-    except Exception as e:
-        logger.error(f"Error processing example: {e}") # Use the variable 'e'
-        return None # Signal to collate_fn to skip
-
-    # Return processed dictionary
-    processed = {
-        "pixel_values": pixel_values.detach() if pixel_values is not None else None,
-        "input_ids_2": input_ids_2.detach() if input_ids_2 is not None else None,
-    }
-    if text_ids is not None:
-         processed["text_ids"] = text_ids.detach()
-
-    # Filter out examples where essential tensors are None right before returning
-    if processed["pixel_values"] is None or processed["input_ids_2"] is None:
-        # logger.warning(f"Returning None because essential tensors are missing for {path}.")
-        return None
-
-    return processed
+    return output_batch
 
 # --- End New Transform Function --- #
 
