@@ -1,9 +1,9 @@
 import argparse
 import math
 import os
-import time
 from functools import partial
 from pathlib import Path
+import time
 
 import datasets
 import torch
@@ -23,7 +23,6 @@ from tqdm.auto import tqdm
 
 import numpy as np # Import numpy for type checking
 import logging
-import traceback
 import json
 
 logger = get_logger(__name__)
@@ -73,23 +72,21 @@ def parse_args():
     # Store the path to the config file itself if needed later
     args.config_path = cmd_args.config 
 
-    # Merge command-line arguments into the config-based args
-    for key, value in vars(cmd_args).items():
+    # Convert cmd_args Namespace to dict for easier iteration
+    cmd_args_dict = vars(cmd_args)
+
+    # Override config values with any non-default command-line arguments
+    for key, value in cmd_args_dict.items():
         # Skip the config file path itself
         if key == 'config':
             continue
 
-        # Get the default value defined in the parser
+        # Check if the cmd arg value is different from the parser's default
+        # This handles None for paths, specific values, and boolean flags
         default_value = parser.get_default(key)
-
         if value != default_value:
-            # If CMD value is not the default, it overrides whatever is in config
             print(f"INFO: Overriding '{key}' with command-line value: {value}") # Use print
             setattr(args, key, value)
-        elif not hasattr(args, key):
-            # If CMD value is the default AND the key is not already in args (from config),
-            # ensure the default value is set in args.
-            setattr(args, key, default_value)
 
     # --- Post-merge adjustments specific to certain args ---
     # Use data_dir as dataset_path if dataset_path wasn't set by config or cmd line override
@@ -112,8 +109,7 @@ def parse_args():
     # Add other defaults if missing from config or command line
     args.config_path = cmd_args.config # Store the actual config path used
     args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
-    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
-    args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
+    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 0)
     # Ensure validation_split has a default value if not set anywhere
     if not hasattr(args, 'validation_split'):
         args.validation_split = 0.0 # Default to 0 if not in config or cmd line
@@ -121,224 +117,34 @@ def parse_args():
 
     return args
 
-# --- Data Preprocessing Helper Functions ---
-def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2):
-    """Preprocesses a batch of examples for training."""
-    # Determine image paths and handle potential hash column presence
-    # Image files are expected directly in dataset_abs_path, alongside metadata
-    if hash_column and hash_column in examples:
-        # Construct path using dataset_abs_path directly
-        image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[hash_column]]
-    elif image_column in examples:
-        # Assuming image_column contains filenames like 'image_001.jpg'
-        # Construct path using dataset_abs_path directly
-        image_paths = [os.path.join(dataset_abs_path, fn) if '.' in fn else os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[image_column]]
-    else:
-        logger.error(f"Missing required image identifier column ('{image_column}' or '{hash_column}') in examples.")
-        return {"pixel_values": [None] * len(examples.get(list(examples.keys())[0], [])), "input_ids_2": [None] * len(examples.get(list(examples.keys())[0], []))}
-
-    original_batch_size = len(image_paths)
-    # Initialize output lists with Nones
-    pixel_values_list = [None] * original_batch_size
-    input_ids_list = [None] * original_batch_size
-
-    try:
-        # --- Load Images Individually with Error Handling --- #
-        images = [None] * original_batch_size # Pre-allocate list for images or Nones
-        valid_indices = [] # Indices of successfully loaded images
-        for i, path in enumerate(image_paths):
-            try:
-                img = Image.open(path).convert("RGB")
-                logger.debug(f"Loaded image {os.path.basename(path)}: Mode={img.mode}, Size={img.size}, Format={img.format}")
-                images[i] = img
-                valid_indices.append(i)
-            except IndexError as ie:
-                logger.warning(f"IndexError loading/converting image: {path}. Error: {ie}. Skipping.")
-            except FileNotFoundError:
-                 logger.warning(f"Image file not found during preprocessing: {path}. Skipping.")
-            except Exception as img_err:
-                 logger.warning(f"Error loading/converting image {path}: {img_err}. Skipping.")
-
-        # Filter out None entries to get list of valid PIL images
-        valid_images = [images[i] for i in valid_indices]
-
-        if not valid_images:
-            logger.warning("No valid images could be loaded in this batch.")
-            # Return lists of Nones matching original batch size
-            return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        # --- Image Processing --- #
-        logger.info(f"Processing {len(valid_images)} valid images out of {original_batch_size} in batch.")
-
-        pixel_values_valid_tensor = None
-        try:
-            # Attempt batch processing first
-            image_inputs = image_transforms(valid_images)
-            pixel_values_maybe_numpy = image_inputs['pixel_values']
-
-            if isinstance(pixel_values_maybe_numpy, np.ndarray):
-                pixel_values_valid_tensor = torch.from_numpy(pixel_values_maybe_numpy)
-            elif isinstance(pixel_values_maybe_numpy, torch.Tensor):
-                pixel_values_valid_tensor = pixel_values_maybe_numpy
-            else:
-                raise TypeError(f"Unexpected type from batch image processor: {type(pixel_values_maybe_numpy)}")
-
-        except IndexError as batch_ie:
-            logger.warning(f"Batch image processing failed with IndexError: {batch_ie}. Falling back to individual processing to identify culprit(s).")
-            # Fallback: Process images individually to find the problematic one
-            processed_individual_tensors = {}
-            for i, img_idx in enumerate(valid_indices):
-                img_to_process = images[img_idx]
-                img_path = image_paths[img_idx]
-                try:
-                    individual_input = image_transforms([img_to_process]) # Process as a batch of 1
-                    logger.debug(f"Fallback - image_transforms output: type={type(individual_input)}, value={individual_input}")
-                    logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
-
-                    # Handle direct tensor output or dictionary output
-                    pv_individual = None
-                    if isinstance(individual_input, torch.Tensor):
-                        # If image_transforms returns a tensor directly
-                        pv_individual = individual_input.squeeze(0) # Assume it might still have a batch dim of 1
-                        logger.debug(f"Fallback - Handled direct tensor output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
-                    elif isinstance(individual_input, dict) and 'pixel_values' in individual_input:
-                        # If image_transforms returns a dict (original expectation)
-                        pv_maybe_numpy_or_tensor = individual_input['pixel_values']
-                        if isinstance(pv_maybe_numpy_or_tensor, np.ndarray):
-                            pv_individual = torch.from_numpy(pv_maybe_numpy_or_tensor).squeeze(0) # Remove batch dim
-                        elif isinstance(pv_maybe_numpy_or_tensor, torch.Tensor):
-                             pv_individual = pv_maybe_numpy_or_tensor.squeeze(0) # Remove batch dim
-                        else:
-                            logger.warning(f"Fallback - Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)}")
-                        if pv_individual is not None:
-                             logger.debug(f"Fallback - Handled dict output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
-                    else:
-                        logger.error(f"Fallback - Unexpected output type from image_transforms: {type(individual_input)}")
-
-                    if pv_individual is not None:
-                        processed_individual_tensors[img_idx] = pv_individual
-                        logger.debug(f"Successfully processed fallback image {os.path.basename(img_path)}")
-                    else:
-                         logger.warning(f"Fallback - Failed to extract tensor for image {os.path.basename(img_path)}")
-
-
-                except Exception as individual_e: # Catch specific errors if needed
-                    # Use traceback for more detailed error logging in fallback
-                    tb_str = traceback.format_exc()
-                    logger.error(f"--> Error <-- Fallback processing failed for image {img_path}. Error: {individual_e}\nTraceback:\n{tb_str}. Skipping.")
-                    # processed_individual_tensors[img_idx] remains None
-
-            # Reconstruct the batch tensor from successfully processed individual images
-            valid_tensors_list = [processed_individual_tensors.get(idx) for idx in valid_indices if processed_individual_tensors.get(idx) is not None]
-            if not valid_tensors_list:
-                 logger.error("No images could be processed individually after batch failure.")
-                 return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-            pixel_values_valid_tensor = torch.stack(valid_tensors_list)
-            # Update valid_indices to only include successfully processed ones *after fallback*
-            valid_indices = [idx for idx in valid_indices if processed_individual_tensors.get(idx) is not None]
-            if not valid_indices:
-                logger.error("Valid indices list is empty after individual processing fallback.")
-                return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        except Exception as process_e:
-            logger.error(f"General error during image processing: {process_e}")
-            return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        # If pixel_values_valid_tensor is still None here, something went wrong
-        if pixel_values_valid_tensor is None:
-             logger.error("pixel_values_valid_tensor is unexpectedly None after image processing block.")
-             return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        # --- Text Processing (Batched) ---
-        # Ensure we use the potentially updated valid_indices from fallback processing
-        valid_captions = [str(examples[caption_column][i]) if examples[caption_column][i] is not None else "" for i in valid_indices]
-
-        # Process only the valid captions
-        max_len = getattr(tokenizer_2, 'model_max_length', 512)
-        if not valid_captions:
-             # This case should ideally not happen if valid_images exist, but check anyway
-             logger.error("No valid captions found corresponding to valid images.")
-             return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        text_inputs = tokenizer_2(
-            valid_captions, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
-        )
-        input_ids_valid_tensor = text_inputs['input_ids'] # Tensor [NumValid, SeqLen]
-
-        # --- Sanity Check Batch Sizes (Should match num valid images) ---
-        num_valid = len(valid_images)
-        if pixel_values_valid_tensor.shape[0] != num_valid or input_ids_valid_tensor.shape[0] != num_valid:
-            logger.error(f"Batch size mismatch after processing valid items in preprocess_train. Expected {num_valid}, got {pixel_values_valid_tensor.shape[0]} images and {input_ids_valid_tensor.shape[0]} texts. Skipping batch.")
-            return {"pixel_values": pixel_values_list, "input_ids_2": input_ids_list}
-
-        # --- Distribute Valid Tensors into Full-Sized Lists ---
-        valid_item_idx = 0
-        for original_idx in valid_indices:
-            # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values = pixel_values_valid_tensor[valid_item_idx].detach()
-            # Ensure pixel_values is definitely a tensor before appending
-            if not isinstance(pixel_values, torch.Tensor):
-                try:
-                    # Attempt conversion assuming it's list-like or numpy-like
-                    pixel_values = torch.tensor(pixel_values, dtype=torch.float32)
-                    logger.debug(f"Converted pixel_values to tensor. Shape: {pixel_values.shape}")
-                except Exception as convert_err:
-                    logger.error(f"Failed to convert pixel_values (type: {type(pixel_values)}) to tensor: {convert_err}. Appending None.")
-                    pixel_values = None # Mark as invalid
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].detach()
-            pixel_values_list[original_idx] = pixel_values
-            valid_item_idx += 1
-
-        # --- Return Lists for Dataset Map --- #
-        return {
-            "pixel_values": pixel_values_list, # List of Tensors/Nones [original_batch_size]
-            "input_ids_2": input_ids_list,   # List of Tensors/Nones [original_batch_size]
-        }
-
-    except Exception as e:
-        logger.error(f"General error during preprocessing batch: {e}", exc_info=True)
-        # Return lists of Nones on general failure
-        return {"pixel_values": [None] * original_batch_size, "input_ids_2": [None] * original_batch_size}
-
-def preprocess_imagefolder(examples, image_transforms, image_column):
-    """Preprocesses imagefolder batch using image_processor.preprocess."""
-    batch_size = len(examples[image_column])
-    try:
-        images = [image.convert("RGB") for image in examples[image_column]]
-
-        # Process image batch using image_processor.preprocess
-        image_inputs = image_transforms(images, return_tensors="pt")
-        pixel_values_batch_tensor = image_inputs['pixel_values']
-
-        # Create dummy text inputs (batch tensor)
-        # Note: Ensure tokenizer_2 exists or define max_len
-        # max_len = 77
-        # dummy_ids = torch.zeros((batch_size, max_len), dtype=torch.long)
-        dummy_ids = torch.zeros((batch_size, 1), dtype=torch.long) # Simpler placeholder
-
-        if pixel_values_batch_tensor.shape[0] != batch_size:
-             logger.error(f"Batch size mismatch for images in preprocess_imagefolder. Expected {batch_size}, got {pixel_values_batch_tensor.shape[0]}.")
-             return {"pixel_values": None, "input_ids_2": None}
-
-        return {
-            "pixel_values": pixel_values_batch_tensor,
-            "input_ids_2": dummy_ids,
-        }
-    except Exception as e:
-        logger.error(f"Error during imagefolder preprocessing batch: {e}")
-        return {"pixel_values": None, "input_ids_2": None}
-
 # --- New Transform Function for set_transform --- #
 def transform_example(example, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2, text_id_map=None):
     # Use the global logger instance configured in main
     logger = logging.getLogger(__name__)
 
     # Get image path and caption
-    image_hash = example.get(hash_column)
-    caption = str(example.get(caption_column)) if example.get(caption_column) is not None else ""
+    # --- Handle potential list values from DataLoader/set_transform --- >
+    image_hash_val = example.get(hash_column)
+    caption_val = example.get(caption_column)
 
-    if not image_hash:
-        logger.warning(f"Missing hash_column '{hash_column}' in example: {example}. Skipping.")
+    image_hash = image_hash_val[0] if isinstance(image_hash_val, list) and len(image_hash_val) > 0 else image_hash_val
+    caption = caption_val[0] if isinstance(caption_val, list) and len(caption_val) > 0 else caption_val
+
+    # Ensure caption is a string after potential extraction, default to empty if None or invalid
+    if caption is None:
+        caption = ""
+    elif not isinstance(caption, str):
+         logger.warning(f"Caption retrieved was not a string (type: {type(caption)}). Value: {repr(caption)}. Converting to string.")
+         caption = str(caption)
+    # <----------------------------------------------------
+
+    # Ensure image_hash is a string after potential extraction
+    if not isinstance(image_hash, str):
+        logger.error(f"Processed image_hash is not a string (type: {type(image_hash)}). Value: {repr(image_hash)}. Original example: {example}. Skipping.")
+        return None
+
+    if not image_hash: # Check if it's an empty string after processing
+        logger.warning(f"Missing or empty value for hash_column ('{hash_column}') after processing example: {example}. Skipping.")
         return None
 
     path = os.path.join(dataset_abs_path, image_hash + ".jpg") # Assuming jpg
@@ -390,7 +196,8 @@ def transform_example(example, dataset_abs_path, image_transforms, image_column,
 
         # 4. Get Text IDs (optional)
         if text_id_map is not None and hash_column in example:
-            text_ids_val = text_id_map.get(example[hash_column], None)
+            # Use the potentially processed image_hash variable
+            text_ids_val = text_id_map.get(image_hash, None)
             if text_ids_val is not None:
                 # Assuming text_ids need conversion to tensor
                 try:
@@ -668,22 +475,21 @@ def main(args):
         logger.info(f"Columns to remove: {columns_to_remove}")
 
         # --- Prepare Preprocessing Function --- #
-        _preprocess_train_func = partial(
-            preprocess_train,
-            dataset_abs_path=args.dataset_path,
-            # Pass the image processor's preprocess method directly
+        _transform_func = partial(
+            transform_example, # Use the NEW function
+            dataset_abs_path=args.data_dir,
             image_transforms=pipeline.image_processor.preprocess,
             image_column=args.image_column,
-            hash_column=getattr(args, 'hash_column', None), # Pass hash_column if defined, else None
             caption_column=args.caption_column,
+            hash_column=getattr(args, 'hash_column', None), # Pass hash_column if defined, else None
             tokenizer_2=tokenizer_2,
         )
 
         logger.info("Preprocessing dataset...")
         processed_dataset = dataset.map(
-            _preprocess_train_func,
+            _transform_func,
             batched=True,
-            num_proc=args.preprocessing_num_workers,
+            num_proc=0, # Removed preprocessing_num_workers
             remove_columns=columns_to_remove,
             desc="Running tokenizer on train dataset",
         )
@@ -696,16 +502,19 @@ def main(args):
         columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
         logger.info(f"Columns to remove: {columns_to_remove}")
 
-        _preprocess_imagefolder_func = partial(
-             preprocess_imagefolder,
-             # Pass the image processor's preprocess method directly
+        _transform_func = partial(
+             transform_example, # Use the NEW function
+             dataset_abs_path=args.data_dir,
              image_transforms=pipeline.image_processor.preprocess,
              image_column=args.image_column,
+             caption_column=None, # Not needed for imagefolder
+             hash_column=None, # Not needed for imagefolder
+             tokenizer_2=tokenizer_2,
         )
         processed_dataset = dataset.map(
-             _preprocess_imagefolder_func,
+             _transform_func,
              batched=True,
-             num_proc=args.preprocessing_num_workers,
+             num_proc=0, # Removed preprocessing_num_workers
              remove_columns=columns_to_remove,
              desc="Running preprocessing on imagefolder dataset",
         )
@@ -764,14 +573,22 @@ def main(args):
 
     # --- DataLoader --- #
     # Define collate_fn before DataLoader
-    def collate_fn(examples):
-        """Collates preprocessed examples into batches, filtering out invalid entries."""
-        # 1. Filter out None values (examples that failed transformation)
-        valid_examples = [ex for ex in examples if ex is not None]
+    def collate_fn(examples, expected_clip_dim=768, cross_attention_dim=4096):
+        logger = logging.getLogger("collate_fn")
+        # logger.setLevel(logging.DEBUG) # Optional: Set specific level for this logger
+        logger.debug(f"Received {len(examples)} examples in collate_fn")
+
+        # 1. Filter out None examples (where transform_example failed)
+        valid_examples = []
+        for i, ex in enumerate(examples):
+            if ex is not None and isinstance(ex, dict) and ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None:
+                valid_examples.append(ex)
+            else:
+                logger.debug(f"  Discarding example at index {i}. Content: {ex}")
 
         if not valid_examples:
-            logger.warning("Collate function received no valid examples in this batch.")
-            return None # Skip batch if all examples failed
+            logger.warning("collate_fn: No valid examples found in the batch after filtering. Returning None.")
+            return None
 
         # 2. Extract and stack tensors
         try:
@@ -783,30 +600,46 @@ def main(args):
                 "input_ids_2": input_ids_2,
             }
 
-            # 3. Handle optional text_ids
-            if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
-                # Check if all valid examples have text_ids
-                if all("text_ids" in ex and ex["text_ids"] is not None for ex in valid_examples):
-                    try:
-                        text_ids = torch.stack([ex["text_ids"] for ex in valid_examples])
-                        batch["text_ids"] = text_ids
-                    except Exception as stack_err:
-                        logger.warning(f"Could not stack 'text_ids': {stack_err}. Skipping text_ids for this batch.")
-                else:
-                    logger.warning("Some valid examples are missing 'text_ids'. Skipping text_ids for this batch.")
+            # Check if *any* example actually had non-padding text tokens (more robust check for 'has_text')
+            # Assuming padding token ID is 0 for tokenizer_2
+            # This check might need adjustment based on the actual tokenizer's padding ID
+            # A simpler check is if captions were present and non-empty during transform_example
+            # But since input_ids_2 is always generated (even from empty string), we check its content.
+            # For now, we'll rely on the presence of the key, assuming transform_example put valid data.
+            # If input_ids_2 could be all padding for image-only, we need a better flag from transform.
+            # Let's start simple: if input_ids_2 key exists, assume text is intended.
+            batch["has_text"] = True # Assume text is present if input_ids_2 is successfully stacked
 
-            return batch
+            # Handle optional text_ids
+            if all("text_ids" in ex for ex in valid_examples):
+                try:
+                    text_ids = torch.stack([ex["text_ids"] for ex in valid_examples])
+                    batch["text_ids"] = text_ids
+                    # If text_ids are present, we definitely have text-related info
+                    batch["has_text"] = True
+                except Exception as stack_err:
+                    logger.error(f"Error stacking 'text_ids': {stack_err}. Skipping 'text_ids' for this batch.")
+                    # Fall through without text_ids
+            else:
+                logger.debug("Not all valid examples in the batch have 'text_ids'. 'text_ids' key will be absent.")
+                # If input_ids_2 was present but text_ids wasn't, still consider it has_text=True based on input_ids_2
 
         except Exception as e:
-            logger.error(f"Error during collate_fn stacking: {e}", exc_info=True)
-            # Log info about the first valid example if stacking failed
-            if valid_examples:
-                first_ex = valid_examples[0]
-                pv = first_ex.get("pixel_values")
-                id2 = first_ex.get("input_ids_2")
-                tid = first_ex.get("text_ids", "N/A")
-                logger.error(f"  First valid example causing stack error - pixel_values type: {type(pv)}, input_ids_2 type: {type(id2)}, text_ids type: {type(tid)}")
-            return None # Skip batch on stacking error
+            logger.error(f"Error during tensor stacking in collate_fn: {e}", exc_info=True)
+            logger.error(f"Problematic valid_examples sample: {valid_examples[:2]}") # Log sample data
+            return None # Signal error to DataLoader
+
+        # If stacking pixel_values succeeded but input_ids_2 failed or wasn't present in *any* valid example
+        # (This case is less likely with current transform_example which always creates input_ids_2)
+        if "pixel_values" in batch and "input_ids_2" not in batch:
+            logger.debug("Batch contains pixel_values but not input_ids_2. Marking as image-only.")
+            batch["has_text"] = False
+        elif "pixel_values" not in batch:
+            logger.warning("Collate function resulted in a batch without pixel_values. Returning None.")
+            return None # Cannot proceed without images
+
+        logger.debug(f"Collate function returning batch with keys: {list(batch.keys())}")
+        return batch
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1066,32 +899,41 @@ def main(args):
                      )
                      logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
-                # Predict the noise residual using the transformer model
-                # Pass the prepared conditional inputs (placeholders or None)
-                logger.debug(f"  transformer input shape - hidden_states: {latents_reshaped.shape}")
-                logger.debug(f"  transformer input shape - timestep: {timesteps.shape}") 
-                logger.debug(f"  transformer input shape - encoder_hidden_states: {prompt_embeds_2.shape}") # Placeholder ensured
-                logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled.shape}")       # Placeholder ensured
-                logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
-                # Log txt_ids shape only if it exists 
-                if input_ids_2 is not None:
-                     logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape}")
+                # Prepare conditional inputs based on whether text is present
+                transformer_kwargs = {
+                    "img_latent": latents_reshaped,
+                    "timesteps": timesteps,
+                }
+
+                if batch.get("has_text", False):
+                    # --- Text-Conditional Batch --- #
+                    # Required: txt_ids, pooled_projections, encoder_hidden_states
+                    transformer_kwargs["txt_ids"] = batch["input_ids_2"]
+
+                    # TODO: Get actual pooled_projections and encoder_hidden_states
+                    # These should ideally come from the CLIP text encoders used by Flux.
+                    # For now, using placeholders as before, but only for text batches.
+                    clip_dim = getattr(transformer.config, 'projection_dim', 768) # Get from config if possible
+                    cross_attn_dim = getattr(transformer.config, 'cross_attention_dim', 4096)
+                    transformer_kwargs["pooled_projections"] = torch.zeros(bsz, clip_dim, dtype=weight_dtype, device=accelerator.device)
+                    transformer_kwargs["encoder_hidden_states"] = torch.zeros(bsz, 1, cross_attn_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug("Running text-conditional forward pass (using text placeholders)")
+
                 else:
-                     logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
+                    # --- Image-Only Batch --- #
+                    # Required: Placeholders for pooled_projections and encoder_hidden_states
+                    # DO NOT pass txt_ids
+                    clip_dim = getattr(transformer.config, 'projection_dim', 768)
+                    cross_attn_dim = getattr(transformer.config, 'cross_attention_dim', 4096)
+                    transformer_kwargs["pooled_projections"] = torch.zeros(bsz, clip_dim, dtype=weight_dtype, device=accelerator.device)
+                    transformer_kwargs["encoder_hidden_states"] = torch.zeros(bsz, 1, cross_attn_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug("Running image-only forward pass (using placeholders)")
 
-                # Pass arguments explicitly
-                model_pred = transformer(
-                    hidden_states=latents_reshaped,
-                    timestep=timesteps,
-                    encoder_hidden_states=prompt_embeds_2,
-                    pooled_projections=clip_pooled,
-                    img_ids=img_ids,
-                    txt_ids=input_ids_2 # Pass the placeholder tensor
-                )
+                # Call the transformer with dynamically built kwargs
+                model_pred = transformer(**transformer_kwargs).prediction
 
-                # Assume prediction target is the noise (epsilon prediction)
-                target = noise
-                loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
+                # Calculate loss (compare model prediction to noise)
+                loss = F.mse_loss(model_pred.float(), noise.float(), reduction="mean")
 
                 # Gather the losses across all processes for logging (if we use distributed training).
                 avg_loss = accelerator.gather(loss.repeat(args.batch_size)).mean()
