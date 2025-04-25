@@ -25,8 +25,6 @@ import numpy as np # Import numpy for type checking
 import logging
 import traceback
 
-logger = get_logger(__name__)
-
 # --- Argument Parsing ---
 def parse_args():
     parser = argparse.ArgumentParser(description="Simple example of a FLUX training script.")
@@ -316,8 +314,6 @@ def main(args):
     log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
     level = getattr(logging, getattr(args, "log_level", "INFO").upper(), logging.INFO)
     logging.basicConfig(level=level, format=log_format)
-    logger.info(f"Logging level set to {logging.getLevelName(level)}")
-    # ========================
 
     # Initialize Accelerator
     logging_dir = Path(args.output_dir, "logs")
@@ -330,6 +326,12 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # Now initialize logger after Accelerator (accelerate state) is ready
+    global logger
+    from accelerate.logging import get_logger
+    logger = get_logger(__name__)
+    logger.info(f"Logging level set to {logging.getLevelName(level)}")
+    # ========================
     # === Log Logging Level (After Accelerator Init) ===
     logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
     # ===================================================
