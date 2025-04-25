@@ -381,6 +381,7 @@ def main(args):
             split="train",
         )
         logger.info(f"Loaded dataset with {len(dataset)} examples.")
+
     elif args.dataset_type == "hf_metadata":
         metadata_path = os.path.join(dataset_abs_path, "metadata.json")
         logger.info(f"Checking for metadata file for 'hf_metadata' type: {metadata_path}")
@@ -401,13 +402,14 @@ def main(args):
     else:
         raise ValueError("Unsupported dataset type. Please use 'imagefolder' or 'hf_metadata'.")
 
-    # --- Split Dataset --- #
-    if args.val_split > 0.0:
-        if not (0 < args.val_split < 1):
-            raise ValueError("val_split must be between 0 and 1 (exclusive)")
-        logger.info(f"Splitting dataset with validation split: {args.val_split}")
-        # Use the datasets library's built-in splitting method
-        split_dataset = dataset.train_test_split(test_size=args.val_split, seed=args.seed)
+    # Split dataset if validation_split is defined in config
+    if 'validation_split' in args.__dict__ and args.validation_split > 0.0:
+        if not (0 < args.validation_split < 1):
+            raise ValueError("validation_split must be between 0 and 1.")
+        logger.info(f"Splitting dataset with validation split: {args.validation_split}")
+        # Use the seed from config if available, otherwise use the main script seed
+        split_seed = args.seed
+        split_dataset = dataset.train_test_split(test_size=args.validation_split, seed=split_seed)
         train_dataset = split_dataset["train"]
         val_dataset = split_dataset["test"]
         logger.info(f"  Training samples: {len(train_dataset)}")
