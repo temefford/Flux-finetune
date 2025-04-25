@@ -725,18 +725,26 @@ def main(args):
                 if clip_pooled is None:
                     # Get expected dimension from transformer config
                     try:
-                        # Try to get the specific dim expected by the text embedder for pooled projections
                         expected_clip_dim = transformer.config.pooled_projection_dim
                         if expected_clip_dim is None:
                             logger.warning("transformer.config.pooled_projection_dim is None, falling back to 768.")
-                            expected_clip_dim = 768 # Fallback (common in some FLUX variants)
+                            expected_clip_dim = 768
                     except AttributeError:
                         logger.warning("Could not find transformer.config.pooled_projection_dim, falling back to 768.")
-                        expected_clip_dim = 768 # Fallback
-
-                    # Make sure 'bsz' is defined in this scope. It should be from the loop.
+                        expected_clip_dim = 768
                     clip_pooled = torch.zeros(bsz, expected_clip_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.warning(f"clip_pooled was None immediately before logging/transformer call, created placeholder with expected dim {expected_clip_dim}: {clip_pooled.shape}") 
+                    logger.warning(f"clip_pooled was None immediately before logging/transformer call, created placeholder with expected dim {expected_clip_dim}: {clip_pooled.shape}")
+
+                # Ensure prompt_embeds_2 is a tensor, even for image-only datasets
+                if prompt_embeds_2 is None:
+                    cross_attention_dim = getattr(transformer.config, 'cross_attention_dim', None)
+                    if cross_attention_dim is None:
+                        cross_attention_dim = getattr(transformer.config, 'joint_attention_dim', None)
+                    if cross_attention_dim is None:
+                        raise ValueError("Could not determine cross_attention_dim for placeholder prompt_embeds_2.")
+                    # Use seq_len=1 for null prompt
+                    prompt_embeds_2 = torch.zeros(bsz, 1, cross_attention_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2.shape}")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
