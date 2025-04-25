@@ -442,7 +442,6 @@ def main(args):
         preprocess_func,
         batched=True,
         num_proc=1, # Changed from args.preprocessing_num_workers
-        remove_columns=train_dataset.column_names,
         fn_kwargs=preprocess_kwargs # Pass variables here
     )
     # Apply preprocessing to val dataset if it exists
@@ -452,7 +451,6 @@ def main(args):
             preprocess_func,
             batched=True,
             num_proc=1, # Changed from args.preprocessing_num_workers
-            remove_columns=val_dataset.column_names,
             fn_kwargs=preprocess_kwargs # Pass variables here too
         )
 
@@ -463,39 +461,27 @@ def main(args):
         if not examples:
             return {}
 
-        # Debug: Check the type of pixel_values for the first example
-        if examples:
-            first_example_pv = examples[0].get("pixel_values")
-            print(f"DEBUG collate_fn: Type of pixel_values in first example: {type(first_example_pv)}")
-            # If it's a list, print its length and type of the first element
-            if isinstance(first_example_pv, list):
-                print(f"DEBUG collate_fn: Length={len(first_example_pv)}, Type of element 0: {type(first_example_pv[0]) if first_example_pv else 'Empty List'}")
-
-        pixel_values = torch.stack([example["pixel_values"] for example in examples]) # No extra torch.tensor()
+        # Access the tensor directly (assuming remove_columns fix worked)
+        pixel_values = torch.stack([example["pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        # Handle text data if caption_column exists
-        input_ids = None
-        input_ids_2 = None
-        attention_mask = None
-        attention_mask_2 = None
-
-        if "input_ids" in examples[0] and examples[0]["input_ids"] is not None:
-            input_ids = torch.stack([example["input_ids"] for example in examples]) # No extra torch.tensor()
-        if "input_ids_2" in examples[0] and examples[0]["input_ids_2"] is not None:
-            input_ids_2 = torch.stack([example["input_ids_2"] for example in examples]) # No extra torch.tensor()
-        if "attention_mask" in examples[0] and examples[0]["attention_mask"] is not None:
+        # Handle text data (input_ids, attention_mask, etc.)
+        # Check if text keys exist in the first example before stacking
+        batch = {"pixel_values": pixel_values}
+        if "input_ids" in examples[0]:
+            input_ids = torch.stack([example["input_ids"] for example in examples])
+            batch["input_ids"] = input_ids
+        if "input_ids_2" in examples[0]:
+            input_ids_2 = torch.stack([example["input_ids_2"] for example in examples])
+            batch["input_ids_2"] = input_ids_2
+        if "attention_mask" in examples[0]:
             attention_mask = torch.stack([example["attention_mask"] for example in examples])
-        if "attention_mask_2" in examples[0] and examples[0]["attention_mask_2"] is not None:
+            batch["attention_mask"] = attention_mask
+        if "attention_mask_2" in examples[0]:
             attention_mask_2 = torch.stack([example["attention_mask_2"] for example in examples])
+            batch["attention_mask_2"] = attention_mask_2
 
-        return {
-            "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "input_ids_2": input_ids_2,
-            "attention_mask": attention_mask,
-            "attention_mask_2": attention_mask_2,
-        }
+        return batch
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
