@@ -394,9 +394,9 @@ def main(args):
         data_files = {"train": os.path.join(args.dataset_path, "metadata.json")}
         dataset = load_dataset("json", data_files=data_files, split="train")
         # Filter dataset if filter_field and filter_value are provided
-        if args.filter_field and args.filter_value:
-            logger.info(f"Filtering dataset: {args.filter_field} == '{args.filter_value}'")
-            dataset = dataset.filter(lambda example: example.get(args.filter_field) == args.filter_value)
+        if getattr(args, 'filter_field', None) and getattr(args, 'filter_value', None):
+            logger.info(f"Filtering dataset: {getattr(args, 'filter_field', None)} == '{getattr(args, 'filter_value', None)}'")
+            dataset = dataset.filter(lambda example: example.get(getattr(args, 'filter_field', None)) == getattr(args, 'filter_value', None))
             logger.info(f"Filtered dataset size: {len(dataset)}")
         dataset = dataset.shuffle(seed=args.seed)
 
@@ -728,8 +728,26 @@ def main(args):
                     if cross_attention_dim is None:
                         raise ValueError("Could not determine cross_attention_dim for placeholder prompt_embeds_2.")
                     # Use seq_len=1 for null prompt
-                    prompt_embeds_2 = torch.zeros(bsz, 1, cross_attention_dim, dtype=weight_dtype, device=accelerator.device)
+                    prompt_embeds_2 = torch.zeros(
+                        bsz, 1, cross_attention_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
                     logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2.shape}")
+
+                # Ensure input_ids_2 is None for image-only batches before the call
+                if input_ids_2_batch is None:
+                    # This confirmation might seem redundant if it comes in as None, 
+                    # but ensures it's explicitly None before passing.
+                    input_ids_2 = None 
+                    logger.warning("Confirmed input_ids_2 is None for image-only batch.")
+
+                # Create null T5 input IDs if still None
+                if input_ids_2 is None:
+                     input_ids_2 = torch.zeros(
+                         bsz, 1,
+                         dtype=torch.long, device=accelerator.device
+                     )
+                     logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (placeholders or None)
@@ -743,11 +761,6 @@ def main(args):
                      logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape}")
                 else:
                      logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
-
-                # Revert to creating a minimal placeholder for input_ids_2
-                if input_ids_2 is None:
-                     input_ids_2 = torch.zeros(bsz, 1, dtype=torch.long, device=accelerator.device)
-                     logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
                 # Pass arguments explicitly
                 model_pred = transformer(
