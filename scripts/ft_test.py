@@ -23,6 +23,7 @@ from tqdm.auto import tqdm
 
 import numpy as np # Import numpy for type checking
 import logging
+import traceback
 
 logger = get_logger(__name__)
 
@@ -181,20 +182,39 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                     individual_input = image_transforms([img_to_process]) # Process as a batch of 1
                     logger.debug(f"Fallback - image_transforms output: type={type(individual_input)}, value={individual_input}")
                     logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
-                    pv_individual_maybe_numpy = individual_input['pixel_values']
-                    if isinstance(pv_individual_maybe_numpy, np.ndarray):
-                        processed_individual_tensors[img_idx] = torch.from_numpy(pv_individual_maybe_numpy).squeeze(0) # Remove batch dim
-                    elif isinstance(pv_individual_maybe_numpy, torch.Tensor):
-                        processed_individual_tensors[img_idx] = pv_individual_maybe_numpy.squeeze(0) # Remove batch dim
+
+                    # Handle direct tensor output or dictionary output
+                    pv_individual = None
+                    if isinstance(individual_input, torch.Tensor):
+                        # If image_transforms returns a tensor directly
+                        pv_individual = individual_input.squeeze(0) # Assume it might still have a batch dim of 1
+                        logger.debug(f"Fallback - Handled direct tensor output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
+                    elif isinstance(individual_input, dict) and 'pixel_values' in individual_input:
+                        # If image_transforms returns a dict (original expectation)
+                        pv_maybe_numpy_or_tensor = individual_input['pixel_values']
+                        if isinstance(pv_maybe_numpy_or_tensor, np.ndarray):
+                            pv_individual = torch.from_numpy(pv_maybe_numpy_or_tensor).squeeze(0) # Remove batch dim
+                        elif isinstance(pv_maybe_numpy_or_tensor, torch.Tensor):
+                             pv_individual = pv_maybe_numpy_or_tensor.squeeze(0) # Remove batch dim
+                        else:
+                            logger.warning(f"Fallback - Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)}")
+                        if pv_individual is not None:
+                             logger.debug(f"Fallback - Handled dict output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
                     else:
-                        raise TypeError(f"Unexpected type from individual image processor: {type(pv_individual_maybe_numpy)}")
-                    logger.debug(f"Fallback - Image tensor before vae.encode: shape={processed_individual_tensors[img_idx].shape}, dtype={processed_individual_tensors[img_idx].dtype}")
-                except IndexError as individual_ie:
-                    logger.error(f"--> Culprit Found <-- IndexError processing individual image: {img_path}. Error: {individual_ie}. Skipping this image.")
-                    # Ensure this index gets None later
-                except Exception as individual_e:
-                    logger.error(f"Error processing individual image {img_path}: {individual_e}. Skipping this image.")
-                    # Ensure this index gets None later
+                        logger.error(f"Fallback - Unexpected output type from image_transforms: {type(individual_input)}")
+
+                    if pv_individual is not None:
+                        processed_individual_tensors[img_idx] = pv_individual
+                        logger.debug(f"Successfully processed fallback image {os.path.basename(img_path)}")
+                    else:
+                         logger.warning(f"Fallback - Failed to extract tensor for image {os.path.basename(img_path)}")
+
+
+                except Exception as individual_e: # Catch specific errors if needed
+                    # Use traceback for more detailed error logging in fallback
+                    tb_str = traceback.format_exc()
+                    logger.error(f"--> Error <-- Fallback processing failed for image {img_path}. Error: {individual_e}\nTraceback:\n{tb_str}. Skipping.")
+                    # processed_individual_tensors[img_idx] remains None
 
             # Reconstruct the batch tensor from successfully processed individual images
             valid_tensors_list = [processed_individual_tensors.get(idx) for idx in valid_indices if processed_individual_tensors.get(idx) is not None]
