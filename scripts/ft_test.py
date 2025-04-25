@@ -606,6 +606,11 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.info(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
+                # Generate img_ids tensor based on latents_reshaped dimensions
+                batch_size = latents_reshaped.shape[0]
+                seq_len = latents_reshaped.shape[1]
+                img_ids = torch.arange(seq_len, device=accelerator.device).repeat(batch_size, 1)
+
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
                     prompt_embeds_outputs = text_encoder(
@@ -634,6 +639,7 @@ def main(args):
                 logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
                 logger.info(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
                 logger.info(f"Shape BEFORE transformer call - clip_pooled (CLIP): {clip_pooled.shape}")
+                logger.info(f"Shape BEFORE transformer call - img_ids: {img_ids.shape}")
 
                 # Predict the noise residual using the transformer model
                 model_pred = transformer(
@@ -642,6 +648,7 @@ def main(args):
                     encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
                     txt_pooled=clip_pooled.to(accelerator.device),
                     txt_ids=input_ids_2.to(accelerator.device),
+                    img_ids=img_ids, # Provide the generated patch indices
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
