@@ -704,37 +704,15 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
-                # Generate correct 2D img_ids
-                seq_len = height * width
-                row_ids = torch.arange(height, device=latents.device)
-                col_ids = torch.arange(width, device=latents.device)
-                grid_coords = torch.stack(torch.meshgrid(row_ids, col_ids, indexing="ij"), dim=-1).reshape(seq_len, 2)
-                img_ids = grid_coords
-                logger.debug(f"Generated 2D img_ids shape: {img_ids.shape}")
-
-                # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
-                input_ids_2 = torch.zeros(bsz, latents_reshaped.shape[1], dtype=torch.long, device=accelerator.device)
-                logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
-                # Create placeholder T5 embeddings matching img_ids seq_len to avoid passing None to context_embedder
-                prompt_embeds_2 = torch.zeros(bsz, latents_reshaped.shape[1], t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                logger.debug(f"Using placeholder prompt_embeds_2 matching img_ids seq_len: {prompt_embeds_2.shape}")
-
-                # Ensure conditioning inputs exist (prevent NoneType for context_embedder)
-                if prompt_embeds_2 is None:
-                    prompt_embeds_2 = torch.zeros(bsz, latents_reshaped.shape[1], t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.debug(f"Placeholder prompt_embeds_2: {prompt_embeds_2.shape}")
-                if clip_pooled is None:
-                    clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.debug(f"Placeholder clip_pooled: {clip_pooled.shape}")
-                if input_ids_2 is None:
-                    input_ids_2 = torch.zeros(bsz, latents_reshaped.shape[1], dtype=torch.long, device=accelerator.device)
-                    logger.debug(f"Placeholder input_ids_2: {input_ids_2.shape}")
+                # Generate correct 1D img_ids (positional indices) and expand to batch size
+                img_ids_1d = torch.arange(height * width, device=latents.device)
+                img_ids = img_ids_1d.repeat(bsz, 1)
+                logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
                 timesteps = timesteps.long()
-                noisy_latents = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
@@ -748,12 +726,12 @@ def main(args):
                 logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
 
                 model_pred = transformer(
-                    hidden_states=noisy_latents,
+                    hidden_states=latents_reshaped,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
                     pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
                     txt_ids=input_ids_2, # T5 IDs (None for img-only)
-                    img_ids=img_ids,     # Pass generated 2D spatial IDs
+                    img_ids=img_ids,     # Pass generated 1D img_ids
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -877,13 +855,11 @@ def main(args):
                             prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
                         # Else: prompt_embeds_2 remains None
 
-                    # Generate correct 2D img_ids for validation
+                    # Generate correct 1D img_ids for validation
                     seq_len_val = height_val * width_val
-                    row_ids_val = torch.arange(height_val, device=latents.device)
-                    col_ids_val = torch.arange(width_val, device=latents.device)
-                    grid_coords_val = torch.stack(torch.meshgrid(row_ids_val, col_ids_val, indexing="ij"), dim=-1).reshape(seq_len_val, 2)
-                    img_ids_val = grid_coords_val
-                    logger.debug(f"Generated validation 2D img_ids shape: {img_ids_val.shape}")
+                    img_ids_1d_val = torch.arange(seq_len_val, device=latents.device)
+                    img_ids_val = img_ids_1d_val.repeat(bsz_val, 1) # Use bsz_val
+                    logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
 
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents_reshaped_val)
@@ -896,8 +872,9 @@ def main(args):
                         hidden_states=latents_reshaped_val,
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
-                        txt_ids=input_ids_2, # Re-added T5 token IDs
-                        img_ids=img_ids_val, # Use pre-generated validation ids
+                        pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
+                        txt_ids=input_ids_2, # Pass the variable prepared earlier (None for image-only)
+                        img_ids=img_ids_val, # Use corrected 1D validation img_ids
                     ).sample
 
                     # Assume target is noise for validation loss calculation
