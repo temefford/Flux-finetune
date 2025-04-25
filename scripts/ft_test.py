@@ -867,8 +867,6 @@ def main(args):
                 # VAE is prepared by accelerator, handles device/dtype internally via hooks/casting
                 latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
-{{ ... }}
-
                 latents = latents * vae.config.scaling_factor
                 # No need for .to(accelerator.device) here, accelerator handles it
 
