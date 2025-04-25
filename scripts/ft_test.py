@@ -634,10 +634,11 @@ def main(args):
             logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
 
         try:
-            pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
+            # Extract the tensor from the inner list before stacking
+            pixel_values = torch.stack([example["pixel_values"][0] for example in valid_examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            input_ids_2 = torch.stack([example["input_ids_2"] for example in valid_examples])
+            input_ids_2 = torch.stack([example["input_ids_2"][0] for example in valid_examples])
 
             # Return the batch dictionary for the model
             batch = {
