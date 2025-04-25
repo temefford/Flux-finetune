@@ -2,7 +2,8 @@
 
 model_id: "black-forest-labs/FLUX.1-schnell"
 peft_method: "LoRA"
-lora_rank: 8                     # LoRA rank (can be increased later, e.g., 32 or 64)
+lora_rank: 16                # Rank for LoRA matrices (e.g., 4, 8, 16, 32)
+lora_dropout: 0.1           # Dropout probability for LoRA layers
 learning_rate: 1e-4            # Learning rate
 batch_size: 16                 # Per-device batch size (Adjust based on VRAM)
 gradient_accumulation_steps: 2 # Accumulate gradients (16 * 2 = effective batch size 32)
