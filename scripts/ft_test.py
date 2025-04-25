@@ -160,54 +160,48 @@ def preprocess_func(examples, **fn_kwargs):
     if not all([image_transforms, tokenizer, tokenizer_2, args]):
         raise ValueError("Missing required kwargs in preprocess_func (image_transforms, tokenizer, tokenizer_2, args)")
 
-    # 1. Load and Transform Images
-    # For 'imagefolder', the 'image' column contains PIL Image objects
-    # For 'hf_metadata', it might contain paths or bytes - adjust loading if needed
+    # 1. Load and Transform Images into a list of tensors
     try:
         images = [image.convert("RGB") for image in examples[args.image_column]]
     except Exception as e:
         logger.error(f"Error accessing/converting image column '{args.image_column}': {e}")
         logger.error(f"Example keys: {examples.keys()}")
-        # Handle potential issues like incorrect column name or non-image data
-        # For now, let's re-raise or return an empty dict to signal failure
         raise e # Or handle more gracefully
 
-    pixel_values = torch.stack([image_transforms(image) for image in images])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+    # Create a list of processed image tensors
+    pixel_values_list = [image_transforms(image) for image in images]
+    # Apply memory format and dtype to each tensor in the list (optional, can be done in collate_fn)
+    # pixel_values_list = [pv.to(memory_format=torch.contiguous_format).float() for pv in pixel_values_list]
 
     # 2. Tokenize Captions (Handle 'imagefolder' case)
+    num_examples = len(images) # Use length of successfully loaded images
     if args.dataset_type == "imagefolder":
-        # Generate dummy captions and add them directly to the examples dict
-        num_examples = len(images) # Use length of successfully loaded images
-        examples[args.caption_column] = ["" for _ in range(num_examples)] # Add dummy captions under the expected key
-        # Now call tokenize_captions with the modified examples dict
-        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
-    elif args.dataset_type == "hf_metadata": # Assuming hf_metadata has the caption column
-        # Check if caption column exists before accessing
+        # Generate dummy captions and add them directly to the examples dict (as list)
+        examples[args.caption_column] = ["" for _ in range(num_examples)]
+        captions_batch = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+    elif args.dataset_type == "hf_metadata":
         if args.caption_column not in examples:
-            logger.error(f"Caption column '{args.caption_column}' not found in 'hf_metadata' dataset example.")
-            logger.error(f"Available columns: {list(examples.keys())}")
-            # Decide how to handle: raise error, skip example, use empty caption?
             raise KeyError(f"Caption column '{args.caption_column}' missing for hf_metadata.")
-        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+        captions_batch = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
     else:
-        # Should not happen if initial loading logic is correct, but good to handle
-        logger.error(f"Preprocessing encountered unexpected dataset type: {args.dataset_type}")
-        # Fallback or raise error
         raise ValueError(f"Unsupported dataset type in preprocess_func: {args.dataset_type}")
 
-    # 3. VAE Encoding (if not done in training loop)
-    # Moved VAE encoding to the training loop for efficiency
-    # latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
-    # latents = latents * vae.config.scaling_factor
+    # Split the batch tensors from tokenize_captions into lists
+    # Assuming tokenize_captions returns dict like {'input_ids': batch_tensor, ...}
+    input_ids_list = [ids for ids in captions_batch["input_ids"]]
+    input_ids_2_list = [ids for ids in captions_batch["input_ids_2"]]
+    attention_mask_list = [mask for mask in captions_batch["attention_mask"]]
+    attention_mask_2_list = [mask for mask in captions_batch["attention_mask_2"]]
 
-    # Return processed data
+    # 3. VAE Encoding moved to training loop
+
+    # Return processed data as lists for map(batched=True)
     return {
-        "pixel_values": pixel_values,
-        "input_ids": captions["input_ids"],
-        "input_ids_2": captions["input_ids_2"],
-        "attention_mask": captions["attention_mask"],
-        "attention_mask_2": captions["attention_mask_2"],
+        "pixel_values": pixel_values_list,
+        "input_ids": input_ids_list,
+        "input_ids_2": input_ids_2_list,
+        "attention_mask": attention_mask_list,
+        "attention_mask_2": attention_mask_2_list,
     }
 
 # --- Main Function ---
@@ -442,6 +436,7 @@ def main(args):
         preprocess_func,
         batched=True,
         num_proc=1, # Changed from args.preprocessing_num_workers
+        remove_columns=train_dataset.column_names, # Re-add remove_columns
         fn_kwargs=preprocess_kwargs # Pass variables here
     )
     # Apply preprocessing to val dataset if it exists
@@ -451,6 +446,7 @@ def main(args):
             preprocess_func,
             batched=True,
             num_proc=1, # Changed from args.preprocessing_num_workers
+            remove_columns=val_dataset.column_names, # Re-add remove_columns
             fn_kwargs=preprocess_kwargs # Pass variables here too
         )
 
