@@ -45,42 +45,40 @@ def parse_args():
 
     cmd_args = parser.parse_args() # Parse command line args first
 
-    # Load config from YAML file
+    # --- Load Configuration from YAML --- #
     try:
         with open(cmd_args.config, 'r') as f:
             config = yaml.safe_load(f)
     except FileNotFoundError:
-        logger.error(f"Configuration file not found at: {cmd_args.config}")
+        print(f"ERROR: Configuration file not found at: {cmd_args.config}") # Use print
         raise
     except Exception as e:
-        logger.error(f"Error loading configuration file {cmd_args.config}: {e}")
+        print(f"ERROR: Error loading configuration file {cmd_args.config}: {e}") # Use print
         raise
 
     # Create Namespace from YAML config first
     args = argparse.Namespace(**config)
+    # Store the path to the config file itself if needed later
+    args.config_path = cmd_args.config 
 
-    # --- Map config keys to expected attribute names --- #
     # Ensure dataset_path is populated from data_dir in config if it exists
     if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
         args.dataset_path = args.data_dir
-        logger.info(f"Using data_dir '{args.data_dir}' from config as dataset_path.")
-    # Similarly, map model_id if needed by other parts of the script
-    # (Add other mappings here if config keys differ from script attributes)
+        print(f"INFO: Using data_dir '{args.data_dir}' from config as dataset_path.") # Use print
 
-    # --- Apply command-line overrides --- #
     # Override specific keys if they were provided via command line
     if cmd_args.data_dir:
         args.dataset_path = cmd_args.data_dir # Override whatever was set from config
-        logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
+        print(f"INFO: Overriding dataset_path with command-line value: {args.dataset_path}") # Use print
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
-        logger.info(f"Overriding output_dir with command-line value: {args.output_dir}")
+        print(f"INFO: Overriding output_dir with command-line value: {args.output_dir}") # Use print
     if cmd_args.validation_split is not None: # Check if explicitly provided
         args.validation_split = cmd_args.validation_split
-        logger.info(f"Overriding validation_split with command-line value: {args.validation_split}")
+        print(f"INFO: Overriding validation_split with command-line value: {args.validation_split}") # Use print
     if cmd_args.log_level:
         args.log_level = cmd_args.log_level
-        logger.info(f"Overriding log_level with command-line value: {args.log_level}")
+        print(f"INFO: Overriding log_level with command-line value: {args.log_level}") # Use print
 
     # --- Ensure essential args exist and perform adjustments --- #
     # Validate required args that might not have defaults
@@ -102,7 +100,7 @@ def parse_args():
     # Ensure validation_split has a default value if not set anywhere
     if not hasattr(args, 'validation_split'):
         args.validation_split = 0.0 # Default to 0 if not in config or cmd line
-        logger.warning("validation_split not found in config or command line, defaulting to 0.0")
+        print("WARNING: validation_split not found in config or command line, defaulting to 0.0") # Use print
 
     return args
 
