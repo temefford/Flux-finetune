@@ -748,9 +748,9 @@ def main(args):
 
                 # Ensure input_ids_2 (txt_ids) is a tensor, even for image-only datasets
                 if input_ids_2 is None:
-                    seq_len = img_ids.shape[1]
-                    input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
-                    logger.warning(f"input_ids_2 was None, created placeholder: {input_ids_2.shape}")
+                    # For image-only, pass an empty long tensor of shape [bsz, 0]
+                    input_ids_2 = torch.zeros(bsz, 0, dtype=torch.long, device=accelerator.device)
+                    logger.warning(f"input_ids_2 was None, created EMPTY placeholder: {input_ids_2.shape}")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
