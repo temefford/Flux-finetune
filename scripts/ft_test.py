@@ -33,9 +33,11 @@ def parse_args():
         default="configs/ft_config.yaml",
         help="Path to the configuration YAML file relative to the project root.",
     )
-    # Add arguments for data_dir and output_dir to potentially override config
+    # Add arguments for potential overrides
     parser.add_argument("--data_dir", type=str, default=None, help="Override dataset path from config.")
     parser.add_argument("--output_dir", type=str, default=None, help="Override output directory from config.")
+    parser.add_argument("--validation_split", type=float, default=None, help="Validation split ratio (overrides config).")
+    parser.add_argument("--log_level", type=str, default=None, help="Logging level (overrides config).") # Added for consistency
 
     cmd_args = parser.parse_args() # Parse command line args first
 
@@ -50,36 +52,45 @@ def parse_args():
         logging.error(f"Error loading configuration file {cmd_args.config}: {e}")
         raise
 
-    # Create Namespace from YAML config
+    # Create Namespace from YAML config first
     args = argparse.Namespace(**config)
 
-    # Apply command-line overrides (if provided)
-    # Logging will happen in main() after accelerator is initialized
+    # --- Apply command-line overrides --- #
+    # Override specific keys if they were provided via command line
     if cmd_args.data_dir:
-        args.dataset_path = cmd_args.data_dir # Note: config key is dataset_path
+        args.dataset_path = cmd_args.data_dir # Config key is dataset_path
+        logging.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
+        logging.info(f"Overriding output_dir with command-line value: {args.output_dir}")
+    if cmd_args.validation_split is not None: # Check if explicitly provided
+        args.validation_split = cmd_args.validation_split
+        logging.info(f"Overriding validation_split with command-line value: {args.validation_split}")
+    if cmd_args.log_level:
+        args.log_level = cmd_args.log_level
+        logging.info(f"Overriding log_level with command-line value: {args.log_level}")
 
-    # --- Path Adjustments --- 
-    # Make output_dir relative to the project root (where the script is run from)
-    # Assuming the script is run from the 'finetuning' directory
-    # No adjustment needed if output_dir is already relative like 'outputs'
-    # If output_dir was specified as absolute in YAML or command line, it stays absolute.
-    # Let's ensure it exists
+    # --- Ensure essential args exist and perform adjustments --- #
+    # Validate required args that might not have defaults
+    if not hasattr(args, 'dataset_path') or not args.dataset_path:
+        raise ValueError("dataset_path must be specified in the config file or via --data_dir")
+    if not hasattr(args, 'output_dir') or not args.output_dir:
+        raise ValueError("output_dir must be specified in the config file or via --output_dir")
+
+    # Make output_dir absolute if it's relative
     if not os.path.isabs(args.output_dir):
         args.output_dir = os.path.abspath(args.output_dir)
     os.makedirs(args.output_dir, exist_ok=True)
 
-    # Ensure dataset_path is treated as absolute if needed (e.g., /workspace/art)
-    # The config expects an absolute path, so no adjustment needed unless overridden
-    if not hasattr(args, 'dataset_path') or not args.dataset_path:
-         raise ValueError("dataset_path must be specified in the config file or via --data_dir")
-
-    # Add other defaults if missing from config
+    # Add other defaults if missing from config or command line
     args.config_path = cmd_args.config # Store the actual config path used
     args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
     args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
     args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
+    # Ensure validation_split has a default value if not set anywhere
+    if not hasattr(args, 'validation_split'):
+        args.validation_split = 0.0 # Default to 0 if not in config or cmd line
+        logging.warning("validation_split not found in config or command line, defaulting to 0.0")
 
     return args
 
