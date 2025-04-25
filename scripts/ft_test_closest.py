@@ -894,8 +894,8 @@ def main(args):
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
-                img_ids = torch.arange(height * width, device=latents.device)
-                txt_ids = torch.zeros(1, dtype=torch.long, device=latents.device)
+                img_ids = torch.arange(height * width, device=latents.device).unsqueeze(0).repeat(bsz, 1)
+                txt_ids = make_txt_ids(img_ids)
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
@@ -1041,8 +1041,8 @@ def main(args):
                         latents_val = vae_to_transformer_projection(latents_val)
                     bsz_val, c_val, h_val, w_val = latents_val.shape
                     latents_reshaped_val = latents_val.permute(0, 2, 3, 1).reshape(bsz_val, h_val * w_val, c_val)
-                    img_ids_val = torch.arange(h_val * w_val, device=latents_val.device)
-                    txt_ids_val = torch.zeros(1, dtype=torch.long, device=latents_val.device)
+                    img_ids_val = torch.arange(h_val * w_val, device=latents_val.device).unsqueeze(0).repeat(bsz_val, 1)
+                    txt_ids_val = make_txt_ids(img_ids_val)
                     logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
 
                     # Sample noise and timesteps for validation
