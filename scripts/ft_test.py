@@ -149,7 +149,8 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         # --- End logging ---
 
         # Apply transforms - result is a list of tensors
-        pixel_values_list = [image_transforms(image) for image in images]
+        # Assume image_transforms returns [tensor], extract the tensor
+        pixel_values_list = [image_transforms(image)[0] for image in images]
 
         # Tokenize captions
         captions = list(examples[caption_column])
@@ -196,32 +197,58 @@ def preprocess_func(examples, **fn_kwargs):
     # For 'imagefolder', the 'image' column contains PIL Image objects
     # For 'hf_metadata', it might contain paths or bytes - adjust loading if needed
     try:
+        # Load images
         images = [image.convert("RGB") for image in examples[args.image_column]]
+
+        # --- Add logging for image_transforms output ---
+        if images:
+            first_image_transformed = image_transforms(images[0])
+            logger.info(f"preprocess_train: Type of transformed first image: {type(first_image_transformed)}")
+            if isinstance(first_image_transformed, torch.Tensor):
+                logger.info(f"  Shape: {first_image_transformed.shape}")
+            elif isinstance(first_image_transformed, (list, tuple)):
+                logger.info(f"  Length: {len(first_image_transformed)}")
+                if first_image_transformed:
+                    logger.info(f"  Type of first element: {type(first_image_transformed[0])}")
+                    if isinstance(first_image_transformed[0], torch.Tensor):
+                        logger.info(f"    Shape: {first_image_transformed[0].shape}")
+            else:
+                logger.info(f"  Value: {first_image_transformed}")
+        # --- End logging ---
+
+        # Apply transforms - result is a list of tensors
+        # Assume image_transforms returns [tensor], extract the tensor
+        pixel_values_list = [image_transforms(image)[0] for image in images]
+
+        # Tokenize captions
+        captions = list(examples[args.caption_column])
+        captions = [str(c) if c is not None else "" for c in captions]
+        # tokenize_captions returns a tensor [batch, seq_len]
+        text_inputs_2_tensor = tokenize_captions(captions, tokenizer_2)
+
+        # Return a dictionary where values are lists matching the batch size
+        return {
+            "pixel_values": pixel_values_list,
+            "input_ids_2": text_inputs_2_tensor.tolist() # Convert tensor to list of lists
+        }
+
+    except FileNotFoundError as e:
+        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
+        # Return empty structure or raise, depending on desired robustness
+        # Returning structure matching keys might prevent some errors downstream
+        batch_size = len(examples[args.image_column]) # Determine batch size from input
+        return {
+            "pixel_values": [None] * batch_size,
+            "input_ids_2": [None] * batch_size,
+        }
     except Exception as e:
-        logger.error(f"Error accessing/converting image column '{args.image_column}': {e}")
-        logger.error(f"Example keys: {examples.keys()}")
-        # Handle potential issues like incorrect column name or non-image data
-        # For now, let's re-raise or return an empty dict to signal failure
-        raise e # Or handle more gracefully
-
-    pixel_values = torch.stack([image_transforms(image) for image in images])
-    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
-
-    # 2. Tokenize Captions (Handle 'imagefolder' case)
-    if args.dataset_type == "imagefolder":
-        # Image-only: Set text inputs to None
-        logger.debug("Image-only batch detected. Using None for text inputs.")
-    else:
-        # Multimodal: Get text inputs from batch and encode
-        input_ids_2_batch = examples[args.caption_column]
-        captions = tokenize_captions(input_ids_2_batch, tokenizer_2)
-        captions = captions["input_ids"]
-
-    # Return processed data
-    return {
-        "pixel_values": pixel_values,
-        "input_ids_2": captions, # Return only the input_ids
-    }
+        logger.error(f"Error during image preprocessing: {e}")
+        # Similar error handling as above
+        batch_size = len(examples[args.image_column])
+        return {
+            "pixel_values": [None] * batch_size,
+            "input_ids_2": [None] * batch_size,
+        }
 
 # --- Main Function ---
 def main(args):
