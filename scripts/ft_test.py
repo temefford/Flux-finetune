@@ -614,7 +614,7 @@ def main(args):
     def collate_fn(examples):
         """Collates preprocessed examples into batches, filtering out invalid entries."""
         # Filter out entries where pixel_values is None (indicating a preprocessing failure for that example)
-        valid_examples = [ex for ex in examples if ex["pixel_values"] is not None and ex["input_ids_2"] is not None]
+        valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
 
         if not valid_examples:
             logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
@@ -633,27 +633,59 @@ def main(args):
             ids2_shape = getattr(ids2, 'shape', 'N/A')
             logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
 
-        try:
-            # Extract the tensor from the inner list before stacking
-            pixel_values = torch.stack([example["pixel_values"][0] for example in valid_examples])
-            pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+        # === Add detailed logging for the first valid example ===
+        first_example = valid_examples[0]
+        first_pv = first_example.get('pixel_values')
+        logger.debug(f"Collate - First valid example pixel_values type: {type(first_pv)}")
+        if isinstance(first_pv, list):
+            logger.debug(f"Collate - First valid example pixel_values is a list. Length: {len(first_pv)}")
+            if len(first_pv) > 0:
+                first_pv_elem0 = first_pv[0]
+                logger.debug(f"Collate - First valid example pixel_values[0] type: {type(first_pv_elem0)}")
+                if isinstance(first_pv_elem0, torch.Tensor):
+                    logger.debug(f"Collate - First valid example pixel_values[0] shape: {first_pv_elem0.shape}")
+                elif isinstance(first_pv_elem0, list):
+                     logger.debug(f"Collate - First valid example pixel_values[0] is also a list! Length: {len(first_pv_elem0)}")
+        # ========================================================
 
+        try:
+            # Extract tensors correctly based on the actual structure
+            # Assuming the previous hypothesis: example['pixel_values'] is like [tensor]
+            pixel_values = torch.stack([example["pixel_values"][0] for example in valid_examples])
             input_ids_2 = torch.stack([example["input_ids_2"][0] for example in valid_examples])
 
-            # Return the batch dictionary for the model
+            # Assuming text_ids might not always be present or needed (e.g., image-only fine-tuning)
+            # Handle potential KeyError if 'text_ids' wasn't generated or kept
+            text_ids = None
+            if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
+                # Check if text_ids is also nested
+                if isinstance(valid_examples[0]["text_ids"], list):
+                     text_ids = torch.stack([example["text_ids"][0] for example in valid_examples])
+                else:
+                     text_ids = torch.stack([example["text_ids"] for example in valid_examples])
+
             batch = {
                 "pixel_values": pixel_values,
                 "input_ids_2": input_ids_2,
             }
+            if text_ids is not None:
+                batch["text_ids"] = text_ids
+
             return batch
-        except Exception as e:
-            logger.error(f"Error during collate_fn stacking: {e}", exc_info=True)
-            # Log tensor shapes for debugging if possible
-            for i, ex in enumerate(valid_examples):
-                pv_shape = ex['pixel_values'].shape if isinstance(ex.get('pixel_values'), torch.Tensor) else 'Not Tensor'
-                id_shape = ex['input_ids_2'].shape if isinstance(ex.get('input_ids_2'), torch.Tensor) else 'Not Tensor'
-                logger.error(f"  Example {i} shapes - pixel_values: {pv_shape}, input_ids_2: {id_shape}")
-            return None # Skip batch if stacking fails
+
+        except (TypeError, IndexError) as e:
+            logger.error(f"Error during collate_fn stacking: {e}")
+            # Log shapes/types for debugging
+            for i, example in enumerate(valid_examples):
+                pv = example.get('pixel_values')
+                i2 = example.get('input_ids_2')
+                pv_info = f"shape={pv.shape}, dtype={pv.dtype}" if isinstance(pv, torch.Tensor) else "Not Tensor"
+                i2_info = f"shape={i2.shape}, dtype={i2.dtype}" if isinstance(i2, torch.Tensor) else "Not Tensor"
+                logger.error(f"  Example {i} shapes - pixel_values: {pv_info}, input_ids_2: {i2_info}")
+
+            # Propagate the error or return a special value
+            # For now, return None to indicate a failed batch collation
+            return None
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
