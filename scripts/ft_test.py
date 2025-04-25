@@ -205,9 +205,8 @@ def preprocess_func(examples, **fn_kwargs):
         "pixel_values": pixel_values,
         "input_ids": captions["input_ids"],
         "input_ids_2": captions["input_ids_2"],
-        # Add attention masks if needed by your model/loss function
-        # "attention_mask": captions["attention_mask"],
-        # "attention_mask_2": captions["attention_mask_2"],
+        "attention_mask": captions["attention_mask"],
+        "attention_mask_2": captions["attention_mask_2"],
     }
 
 # --- Main Function ---
