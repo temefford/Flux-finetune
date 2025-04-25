@@ -271,8 +271,13 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
             # AFTER   (no .tolist(), stays a Tensor)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu()
-            input_ids_list[original_idx]    = input_ids_valid_tensor[valid_item_idx].cpu()
+            # AFTER   ─ convert to NumPy (or .tolist()) so HF-Datasets can store it
+            pixel_values_list[original_idx] = (
+                    pixel_values_valid_tensor[valid_item_idx].cpu().numpy()
+            )
+            input_ids_list[original_idx]    = (
+                    input_ids_valid_tensor[valid_item_idx].cpu().numpy()
+            )
             valid_item_idx += 1
         # --- Return Lists for Dataset Map --- #
         return {                   # HF datasets will happily keep lists
@@ -602,7 +607,7 @@ def main(args):
         # Only keep rows with non-empty image tensors
         pv = example["pixel_values"]
         # AFTER
-        valid = isinstance(pv, torch.Tensor) and pv.ndim >= 3    # (C,H,W) or (H,W)
+        valid = pv is not None        # we only need to know the image wasn't dropped   
         if not valid:
             logger.warning(f"Filtered out example: pixel_values={type(pv)}, shape={getattr(pv, 'shape', None)}, input_ids_2={type(example.get('input_ids_2', None))}")
         return valid
