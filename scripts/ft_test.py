@@ -484,15 +484,48 @@ def main(args):
         valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
 
         if not valid_examples:
+            logger.warning("Collate fn: No valid examples found after filtering Nones.")
             return {} # Return empty batch if all examples failed
 
-        # Examples should now have 'pixel_values' as tensor, 'input_ids_2' as list
-        pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
+        # Handle potential list wrapping of tensors
+        pixel_values_to_stack = []
+        input_ids_to_stack = []
+        for i, example in enumerate(valid_examples):
+            pv = example.get("pixel_values")
+            ids = example.get("input_ids_2")
+
+            processed_pv = None
+            if isinstance(pv, torch.Tensor):
+                processed_pv = pv
+            elif isinstance(pv, list) and len(pv) == 1 and isinstance(pv[0], torch.Tensor):
+                # Handle the case where pixel_values is a list containing a single tensor
+                processed_pv = pv[0]
+                logger.debug(f"Collate fn: Extracted tensor from list for example {i}") # Debug message
+            else:
+                # Log unexpected structure if it occurs despite filtering
+                logger.error(f"Collate fn: Unexpected structure for pixel_values in valid example {i}: {type(pv)}. Skipping.")
+                continue # Skip this example
+
+            pixel_values_to_stack.append(processed_pv)
+            input_ids_to_stack.append(torch.tensor(ids)) # Convert list of ids to tensor
+
+        if not pixel_values_to_stack:
+            logger.error("Collate fn: No valid pixel_values tensors could be extracted after handling structures.")
+            return {} # Return empty if all valid examples had unexpected structure
+
+        # Stack the processed tensors
+        pixel_values = torch.stack(pixel_values_to_stack)
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        # Convert list of lists for input_ids_2 back to tensor
-        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in valid_examples])
+        # Stack the input_ids tensors
+        input_ids_2 = torch.stack(input_ids_to_stack)
 
+        # Final check for consistent batch size
+        if pixel_values.shape[0] != input_ids_2.shape[0]:
+             logger.error(f"Collate fn: Batch size mismatch after stacking! PV: {pixel_values.shape[0]}, IDs: {input_ids_2.shape[0]}")
+             # Handle mismatch appropriately, e.g., raise error or return empty
+             return {}
+        
         return {
             "pixel_values": pixel_values,
             "input_ids_2": input_ids_2,
