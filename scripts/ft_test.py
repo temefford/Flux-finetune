@@ -711,14 +711,12 @@ def main(args):
                 img_ids = torch.arange(seq_len, device=latents.device).repeat(bsz, 1)
                 logger.debug(f"Using arange-based img_ids: {img_ids.shape}")
 
-                # Handle case where 'caption' is not in the batch (image-only dataset)
-                if args.dataset_type == "imagefolder":
-                    # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
-                    input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
-                    logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
-                    # Create placeholder T5 embeddings matching img_ids seq_len to avoid passing None to context_embedder
-                    prompt_embeds_2 = torch.zeros(bsz, seq_len, t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.debug(f"Using placeholder prompt_embeds_2 matching img_ids seq_len: {prompt_embeds_2.shape}")
+                # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
+                input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
+                logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
+                # Create placeholder T5 embeddings matching img_ids seq_len to avoid passing None to context_embedder
+                prompt_embeds_2 = torch.zeros(bsz, seq_len, t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                logger.debug(f"Using placeholder prompt_embeds_2 matching img_ids seq_len: {prompt_embeds_2.shape}")
 
                 # Ensure conditioning inputs exist (prevent NoneType for context_embedder)
                 if prompt_embeds_2 is None:
