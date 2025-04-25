@@ -726,6 +726,12 @@ def main(args):
                 logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape if input_ids_2 is not None else 'None'}")
                 logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
 
+                # Ensure pooled projections exist (create placeholder if needed) -- Placed here to prevent logging error
+                if clip_pooled is None:
+                    clip_embed_dim = 1280 # Default CLIP projection dim, consider making dynamic if needed
+                    clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.warning(f"clip_pooled was None before logging, created placeholder: {clip_pooled.shape}")
+
                 model_pred = transformer(
                     hidden_states=latents_reshaped,
                     timestep=timesteps,
