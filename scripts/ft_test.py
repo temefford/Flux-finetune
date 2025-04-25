@@ -572,7 +572,7 @@ def main(args):
             _preprocess_train_func,
             batched=True,
             num_proc=args.preprocessing_num_workers,
-            remove_columns=columns_to_remove,
+            remove_columns=list(set(original_columns) - columns_to_keep),
             desc="Running tokenizer on train dataset",
         )
     elif args.dataset_type == "imagefolder":
