@@ -318,22 +318,13 @@ def main(args):
     if args.peft_method == "LoRA":
         logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
 
-        # --- Print module names to find LoRA targets ---
-        logger.info("--- Transformer Module Names ---")
-        for name, module in transformer.named_modules():
-            # Print names that might be attention projections
-            if 'attn' in name and ('proj' in name or name.endswith(('.q', '.k', '.v'))):
-                 logger.info(f"Potential target: {name}")
-        logger.info("-------------------------------")
-        # ----------------------------------------------
-
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
-            # Target the Q, K, V projections based on printed names
-            target_modules=["q_proj", "k_proj", "v_proj"], # Corrected target modules
-            lora_dropout=0.1, # Optional dropout
-            bias="none",
+            target_modules=["add_q_proj", "add_k_proj", "add_v_proj"], # Corrected target modules
+            lora_dropout=args.lora_dropout,
+            init_lora_weights="gaussian",
+            bias="none", # Bias can be 'none', 'all', or 'lora_only'
         )
         transformer.add_adapter(transformer_lora_config)
         # Ensure LoRA layers are float32 for stability if using mixed precision
@@ -341,7 +332,7 @@ def main(args):
              for name, param in transformer.named_parameters():
                 if "lora_" in name:
                     param.data = param.data.to(torch.float32)
-        logger.info(f"Added LoRA with rank {args.lora_rank} to {{'q_proj', 'k_proj', 'v_proj'}}")
+        logger.info(f"Added LoRA with rank {args.lora_rank} to {{'add_q_proj', 'add_k_proj', 'add_v_proj'}}")
 
     else:
         logger.warning(f"PEFT method '{args.peft_method}' not implemented for this script. Training full model.")
