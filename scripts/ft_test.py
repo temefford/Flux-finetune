@@ -1,12 +1,10 @@
 import argparse
-import logging
 import math
 import os
 import time
 from pathlib import Path
 
 import datasets
-import diffusers
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
@@ -15,16 +13,14 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
-
 from diffusers import FluxPipeline, DDPMScheduler
 from diffusers.optimization import get_scheduler
 from peft import LoraConfig, PeftModel
 from PIL import Image
-# Removed unused Dataset import
 from torchvision import transforms
 from tqdm.auto import tqdm
 
-logger = get_logger(__name__, log_level="INFO")
+logger = get_logger(__name__)
 
 # --- Argument Parsing ---
 def parse_args():
@@ -54,10 +50,10 @@ def parse_args():
         with open(cmd_args.config, 'r') as f:
             config = yaml.safe_load(f)
     except FileNotFoundError:
-        logging.error(f"Configuration file not found at: {cmd_args.config}")
+        logger.error(f"Configuration file not found at: {cmd_args.config}")
         raise
     except Exception as e:
-        logging.error(f"Error loading configuration file {cmd_args.config}: {e}")
+        logger.error(f"Error loading configuration file {cmd_args.config}: {e}")
         raise
 
     # Create Namespace from YAML config first
@@ -67,7 +63,7 @@ def parse_args():
     # Ensure dataset_path is populated from data_dir in config if it exists
     if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
         args.dataset_path = args.data_dir
-        logging.info(f"Using data_dir '{args.data_dir}' from config as dataset_path.")
+        logger.info(f"Using data_dir '{args.data_dir}' from config as dataset_path.")
     # Similarly, map model_id if needed by other parts of the script
     # (Add other mappings here if config keys differ from script attributes)
 
@@ -75,16 +71,16 @@ def parse_args():
     # Override specific keys if they were provided via command line
     if cmd_args.data_dir:
         args.dataset_path = cmd_args.data_dir # Override whatever was set from config
-        logging.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
+        logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
-        logging.info(f"Overriding output_dir with command-line value: {args.output_dir}")
+        logger.info(f"Overriding output_dir with command-line value: {args.output_dir}")
     if cmd_args.validation_split is not None: # Check if explicitly provided
         args.validation_split = cmd_args.validation_split
-        logging.info(f"Overriding validation_split with command-line value: {args.validation_split}")
+        logger.info(f"Overriding validation_split with command-line value: {args.validation_split}")
     if cmd_args.log_level:
         args.log_level = cmd_args.log_level
-        logging.info(f"Overriding log_level with command-line value: {args.log_level}")
+        logger.info(f"Overriding log_level with command-line value: {args.log_level}")
 
     # --- Ensure essential args exist and perform adjustments --- #
     # Validate required args that might not have defaults
@@ -106,7 +102,7 @@ def parse_args():
     # Ensure validation_split has a default value if not set anywhere
     if not hasattr(args, 'validation_split'):
         args.validation_split = 0.0 # Default to 0 if not in config or cmd line
-        logging.warning("validation_split not found in config or command line, defaulting to 0.0")
+        logger.warning("validation_split not found in config or command line, defaulting to 0.0")
 
     return args
 
@@ -172,14 +168,14 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         text_inputs_2 = tokenize_captions(hashes, tokenizer_2) # Use tokenizer_2
         examples["input_ids_2"] = text_inputs_2
     except FileNotFoundError as e:
-        logging.error(f"Error opening image: {e}. Check dataset_path and file names.")
+        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
         # Decide how to handle: skip batch, raise error, etc.
         # For now, let's add a placeholder or skip - adding None might cause issues later
         # Safest might be to ensure paths are correct before this step.
         # Re-raising for now to make the error visible.
         raise e
     except Exception as e:
-        logging.error(f"Error during image preprocessing: {e}")
+        logger.error(f"Error during image preprocessing: {e}")
         raise e
     return examples
 
@@ -246,8 +242,6 @@ def preprocess_func(examples, **fn_kwargs):
 
 # --- Main Function ---
 def main(args):
-    logger = logging.getLogger(__name__)
-
     # Initialize Accelerator
     logging_dir = Path(args.output_dir, "logs")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -259,16 +253,10 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
-    logger.debug(f"Effective args.data_dir after parsing: {args.data_dir}")
+    accelerator.print(f"DEBUG: Effective args.data_dir after parsing: {args.data_dir}")
 
     # Make one log on every process with the configuration for debugging.
-    logger.info(accelerator.state, main_process_only=False)
-    if accelerator.is_local_main_process:
-        datasets.utils.logging.set_verbosity_warning()
-        diffusers.utils.logging.set_verbosity_info()
-    else:
-        datasets.utils.logging.set_verbosity_error()
-        diffusers.utils.logging.set_verbosity_error()
+    accelerator.print(f"Accelerator state: {accelerator.state}")
 
     if args.seed is not None:
         set_seed(args.seed)
