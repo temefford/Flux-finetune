@@ -491,7 +491,7 @@ def main(args):
         "tokenizer": tokenizer,
         "tokenizer_2": tokenizer_2,
         "args": args, # Pass the args namespace
-        "hash_column": args.hash_column
+        "caption_column": args.caption_column # Pass caption_column
     }
     train_dataset = train_dataset.map(
         preprocess_train,
@@ -503,12 +503,19 @@ def main(args):
     # Apply preprocessing to val dataset if it exists
     if val_dataset:
         logger.info("Preprocessing validation data...")
+        preprocess_kwargs_val = {
+            "image_transforms": image_transforms,
+            "tokenizer": tokenizer,
+            "tokenizer_2": tokenizer_2,
+            "args": args, # Pass the args namespace
+            "caption_column": args.caption_column # Pass caption_column
+        }
         val_dataset = val_dataset.map(
             preprocess_train,
             batched=True,
             num_proc=1, # Changed from args.preprocessing_num_workers
             remove_columns=val_dataset.column_names,
-            fn_kwargs=preprocess_kwargs # Pass variables here too
+            fn_kwargs=preprocess_kwargs_val # Pass variables here too
         )
 
     # Collate function
