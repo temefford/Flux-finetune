@@ -39,7 +39,8 @@ def parse_args():
     # Add arguments for potential overrides
     parser.add_argument("--data_dir", type=str, default=None, help="Override dataset path from config.")
     parser.add_argument("--output_dir", type=str, default=None, help="Override output directory from config.")
-    parser.add_argument("--validation_split", type=float, default=None, help="Validation split ratio (overrides config).")
+    parser.add_argument("--val_split", type=float, default=None, help="Validation split ratio (overrides config).")
+    parser.add_argument("--validation_split", type=float, default=None, help="(Legacy) Validation split ratio (overrides config).")
     parser.add_argument("--log_level", type=str, default=None, help="Logging level (overrides config).") # Added for consistency
     parser.add_argument(
         "--caption_column", type=str, default="text", help="The name of the caption column in the dataset."
@@ -51,6 +52,9 @@ def parse_args():
     cmd_args = parser.parse_args() # Parse command line args first
 
     # --- Load Configuration from YAML --- #
+    # --- Handle conflicting split flags ---
+    if hasattr(cmd_args, "val_split") and getattr(cmd_args, "validation_split", None) is not None:
+        raise ValueError("Specify only one of val_split or --validation_split")
     try:
         with open(cmd_args.config, 'r') as f:
             config = yaml.safe_load(f)
@@ -262,8 +266,8 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].detach().tolist()
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].detach().tolist()
+            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].cpu()
+            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].cpu()
             valid_item_idx += 1
 
         # --- Return Lists for Dataset Map --- #
@@ -309,9 +313,10 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
 def main(args):
     # === Configure Logging ===
     # Set level to DEBUG to capture image property logs
-    log_level = logging.DEBUG
     log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
-    logging.basicConfig(level=log_level, format=log_format)
+    level = getattr(logging, getattr(args, "log_level", "INFO").upper(), logging.INFO)
+    logging.basicConfig(level=level, format=log_format)
+    logger.info(f"Logging level set to {logging.getLevelName(level)}")
     # ========================
 
     # Initialize Accelerator
@@ -329,7 +334,7 @@ def main(args):
     logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
     # ===================================================
 
-    accelerator.print(f"DEBUG: Effective args.data_dir after parsing: {args.data_dir}")
+    accelerator.print(f"DEBUG: Effective args.dataset_path after parsing: {args.dataset_path}")
 
     # Make one log on every process with the configuration for debugging.
     # logger.info(accelerator.state, main_process_only=False)
@@ -409,8 +414,8 @@ def main(args):
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
-            # [Bug 1.4] Use correct FLUX attention module names (actual: to_q, to_k, to_v)
-            target_modules=["to_q", "to_k", "to_v"],
+            # Use correct FLUX attention module names (q_proj, k_proj, v_proj)
+            target_modules=["q_proj", "k_proj", "v_proj"],
             lora_dropout=0.1, # Optional dropout
             bias="none",
         )
@@ -546,14 +551,12 @@ def main(args):
         # Keep necessary columns: image, caption, hash (maybe others based on config)
         # Columns needed by preprocess_train: image_column, hash_column, caption_column
         columns_to_keep = {args.image_column, args.caption_column} # Start with essential ones
-        # Add hash_column only if it exists and is different from image_column (optional)
-        hash_column_val = getattr(args, 'hash_column', None)
-        if hash_column_val: # Only add if defined in args
-             columns_to_keep.add(hash_column_val)
-        columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
-        logger.info(f"Columns to keep: {columns_to_keep}")
-        logger.info(f"Columns to remove: {columns_to_remove}")
-
+        try:
+            logger.info(f"First raw example: {dataset[0]}")
+        except Exception as e:
+            logger.error(f"Could not print first raw example: {e}")
+        logger.info(f"Loaded dataset with {len(dataset)} entries and columns: {dataset.column_names}")
+        logger.info(f"First 5 raw examples: {[dataset[i] for i in range(min(5, len(dataset)))]}")
         # --- Prepare Preprocessing Function --- #
         _preprocess_train_func = partial(
             preprocess_train,
@@ -580,30 +583,6 @@ def main(args):
         try:
             logger.info(f"First raw example: {dataset[0]}")
         except Exception as e:
-            logger.error(f"Could not print first raw example: {e}")
-        logger.info(f"Dataset columns: {dataset.column_names}")
-        dataset = dataset.shuffle(seed=args.seed)
-        original_columns = dataset.column_names
-        columns_to_keep = {args.image_column} # Only need image for imagefolder
-        columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
-        logger.info(f"Columns to remove: {columns_to_remove}")
-
-        _preprocess_imagefolder_func = partial(
-             preprocess_imagefolder,
-             # Pass the image processor's preprocess method directly
-             image_transforms=pipeline.image_processor.preprocess,
-             image_column=args.image_column,
-        )
-        processed_dataset = dataset.map(
-             _preprocess_imagefolder_func,
-             batched=True,
-             num_proc=args.preprocessing_num_workers,
-             remove_columns=columns_to_remove,
-             desc="Running preprocessing on imagefolder dataset",
-        )
-    else:
-        raise ValueError(f"Unsupported dataset_type: {args.dataset_type}")
-
     # Debug: Print first preprocessed example before filtering
     try:
         logger.info(f"First preprocessed example: {processed_dataset[0]}")
@@ -640,6 +619,12 @@ def main(args):
     # --- Create DataLoader --- #
     logger.info("Creating DataLoader...")
 
+    # Fail fast if no training samples remain
+    if len(train_dataset) == 0:
+        raise RuntimeError(
+            "All samples were filtered out – check dataset path, column names, or preprocessing."
+        )
+
     # Collate function (Revert to simplest form)
     def collate_fn(examples):
         """Collates preprocessed examples into batches, filtering out invalid entries."""
@@ -648,8 +633,8 @@ def main(args):
 
         if not valid_examples:
             logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
-            # Return an empty dictionary or None to signal skipping this batch in the training loop
-            return None
+            # Yield an empty list to let DataLoader drop the batch (PyTorch 2.3+ safe)
+            return []
 
 
         try:
@@ -684,6 +669,18 @@ def main(args):
                 logger.error(f"  Example {i} shapes - pixel_values: {pv_shape}, input_ids_2: {id_shape}")
             return None # Skip batch if stacking fails
 
+    import platform
+    # Hugging Face warning: Pillow objects can't be pickled on Windows/macOS. Set num_proc=1 if not Linux.
+    if platform.system() != "Linux":
+        args.preprocessing_num_workers = 1
+    # If fork unavailable (e.g., RunPod container), also set datasets.set_caching_enabled(False)
+    try:
+        import multiprocessing as mp
+        if not hasattr(mp, "get_start_method") or mp.get_start_method() != "fork":
+            datasets.set_caching_enabled(False)
+            args.preprocessing_num_workers = 1
+    except Exception:
+        pass
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
@@ -704,8 +701,17 @@ def main(args):
             num_workers=args.dataloader_num_workers,
         )
 
+    # --- Calculate Training Steps --- 
+    num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
+    if args.max_train_steps is not None and args.max_train_steps > 0:
+        max_train_steps = args.max_train_steps
+        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch) # Recalculate epochs based on max_train_steps
+        logger.info(f"Training for a fixed {max_train_steps} steps, overriding epochs to {args.epochs}.")
+    else:
+        max_train_steps = args.epochs * num_update_steps_per_epoch
+        logger.info(f"Training for {args.epochs} epochs, corresponding to {max_train_steps} steps.")
+
     # --- Learning Rate Scheduler ---
-    # [Bug 1.7] Build scheduler after max_train_steps is finalized
     lr_scheduler = get_scheduler(
         "cosine", # Common scheduler type
         optimizer=optimizer,
@@ -797,19 +803,13 @@ def main(args):
                     logger.debug("Processing batch with T5 text inputs (input_ids_2).")
                     # Encode captions using T5 encoder (encoder_2)
                     prompt_embeds_2 = pipeline.text_encoder_2(input_ids_2_batch)[0]
-                    # pooled_prompt_embeds is not directly used by FLUX transformer, skip generating it unless needed elsewhere
                 else:
-                    # This case should ideally not happen if all examples have captions and were tokenized
                     logger.warning("Batch found with missing 'input_ids_2'. Handling as image-only.")
-                    prompt_embeds = None # Set to None if input_ids was removed
                     prompt_embeds_2 = None
-                    pooled_projections = None
-                    txt_ids = None # Set to None if input_ids was removed
 
-                # Placeholder handling (Memory: 361714d3) - This logic needs review based on removing input_ids
+                # Placeholder handling (Memory: 361714d3)
                 if prompt_embeds_2 is None:
-                    # Need to know the expected cross_attention_dim for FLUX
-                    cross_attn_dim = transformer.config.cross_attention_dim # Check this attribute exists
+                    cross_attn_dim = transformer.config.cross_attention_dim
                     batch_size = pixel_values.shape[0]
                     prompt_embeds_2 = torch.zeros(
                         (batch_size, 1, cross_attn_dim),
@@ -817,14 +817,9 @@ def main(args):
                     )
                     logger.warning(f"Created null T5 embeds: {prompt_embeds_2.shape}")
 
-                # Ensure input_ids_2 is None for image-only batches before the call
                 if input_ids_2_batch is None:
-                    # This confirmation might seem redundant if it comes in as None, 
-                    # but ensures it's explicitly None before passing.
                     input_ids_2 = None 
                     logger.warning("Confirmed input_ids_2 is None for image-only batch.")
-
-                # Create null T5 input IDs if still None
                 if input_ids_2 is None:
                      input_ids_2 = torch.zeros(
                          (batch_size, 1),
