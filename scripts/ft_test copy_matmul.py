@@ -644,6 +644,7 @@ def main(args):
             # --- Handle Missing Conditioning Inputs (Create Placeholders) --- #
             # Get expected embedding dimensions and null sequence length
             t5_embed_dim = getattr(transformer.config, 'cross_attention_dim', transformer.config.joint_attention_dim) # e.g., 4096
+            clip_embed_dim = text_encoder.config.projection_dim # e.g., 1280
             null_sequence_length = 1 # Minimal length for null sequences
 
             # For non-imagefolder datasets, ensure text conditioning placeholders exist
@@ -660,18 +661,11 @@ def main(args):
 
                 # Create null CLIP pooled projections if still None
                 if clip_pooled is None:
-                    try:
-                        # Try to get the specific dim expected by the text embedder for pooled projections
-                        expected_clip_dim = transformer.config.pooled_projection_dim
-                        if expected_clip_dim is None:
-                            logger.warning("transformer.config.pooled_projection_dim is None, falling back to 768.")
-                            expected_clip_dim = 768 # Fallback (common in some FLUX variants)
-                    except AttributeError:
-                        logger.warning("Could not find transformer.config.pooled_projection_dim, falling back to 768.")
-                        expected_clip_dim = 768 # Fallback
-
-                    clip_pooled = torch.zeros(batch_size, expected_clip_dim, dtype=weight_dtype, device=accelerator.device)
-                    logger.warning(f"clip_pooled was None, created placeholder with expected dim {expected_clip_dim}: {clip_pooled.shape}")
+                    clip_pooled = torch.zeros(
+                        batch_size, clip_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
                 else:
                     clip_pooled = clip_pooled.to(dtype=weight_dtype)
 
@@ -720,6 +714,12 @@ def main(args):
                 noise = torch.randn_like(latents_reshaped)
                 timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
                 timesteps = timesteps.long()
+
+                # Ensure pooled projections exist (create placeholder if needed) -- Moved here to prevent logging error
+                if clip_pooled is None:
+                    clip_embed_dim = 1280 # Default CLIP projection dim, consider making dynamic if needed
+                    clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.warning(f"clip_pooled was None before logging, created placeholder: {clip_pooled.shape}")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
