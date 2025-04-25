@@ -317,6 +317,16 @@ def main(args):
     # --- Add LoRA to transformer (UNet equivalent) ---
     if args.peft_method == "LoRA":
         logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
+
+        # --- Print module names to find LoRA targets ---
+        logger.info("--- Transformer Module Names ---")
+        for name, module in transformer.named_modules():
+            # Print names that might be attention projections
+            if 'attn' in name and ('proj' in name or name.endswith(('.q', '.k', '.v'))):
+                 logger.info(f"Potential target: {name}")
+        logger.info("-------------------------------")
+        # ----------------------------------------------
+
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
