@@ -263,8 +263,18 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].detach()
+            pixel_values = pixel_values_valid_tensor[valid_item_idx].detach()
+            # Ensure pixel_values is definitely a tensor before appending
+            if not isinstance(pixel_values, torch.Tensor):
+                try:
+                    # Attempt conversion assuming it's list-like or numpy-like
+                    pixel_values = torch.tensor(pixel_values, dtype=torch.float32)
+                    logger.debug(f"Converted pixel_values to tensor. Shape: {pixel_values.shape}")
+                except Exception as convert_err:
+                    logger.error(f"Failed to convert pixel_values (type: {type(pixel_values)}) to tensor: {convert_err}. Appending None.")
+                    pixel_values = None # Mark as invalid
             input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].detach()
+            pixel_values_list[original_idx] = pixel_values
             valid_item_idx += 1
 
         # --- Return Lists for Dataset Map --- #
@@ -565,7 +575,7 @@ def main(args):
         processed_dataset = dataset.map(
             _preprocess_train_func,
             batched=True,
-            num_proc=args.preprocessing_num_workers,
+            num_proc=1, # Force single process for debugging
             remove_columns=columns_to_remove,
             desc="Running tokenizer on train dataset",
         )
@@ -587,7 +597,7 @@ def main(args):
         processed_dataset = dataset.map(
              _preprocess_imagefolder_func,
              batched=True,
-             num_proc=args.preprocessing_num_workers,
+             num_proc=1, # Force single process for debugging
              remove_columns=columns_to_remove,
              desc="Running preprocessing on imagefolder dataset",
         )
