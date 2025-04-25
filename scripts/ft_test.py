@@ -187,6 +187,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                         processed_individual_tensors[img_idx] = pv_individual_maybe_numpy.squeeze(0) # Remove batch dim
                     else:
                         raise TypeError(f"Unexpected type from individual image processor: {type(pv_individual_maybe_numpy)}")
+                    logger.debug(f"Fallback - Image tensor before vae.encode: shape={processed_individual_tensors[img_idx].shape}, dtype={processed_individual_tensors[img_idx].dtype}")
                 except IndexError as individual_ie:
                     logger.error(f"--> Culprit Found <-- IndexError processing individual image: {img_path}. Error: {individual_ie}. Skipping this image.")
                     # Ensure this index gets None later
