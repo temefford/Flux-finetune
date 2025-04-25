@@ -458,7 +458,6 @@ def main(args):
     preprocess_kwargs = {
         "image_transforms": image_transforms,
         "tokenizer_2": tokenizer_2,
-        "caption_column": args.caption_column # Pass caption_column
     }
     train_dataset = train_dataset.map(
         preprocess_train,
@@ -473,7 +472,6 @@ def main(args):
         preprocess_kwargs_val = {
             "image_transforms": image_transforms,
             "tokenizer_2": tokenizer_2,
-            "caption_column": args.caption_column # Pass caption_column
         }
         val_dataset = val_dataset.map(
             preprocess_train,
