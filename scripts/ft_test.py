@@ -617,16 +617,23 @@ def main(args):
 
 
         try:
-            # Squeeze extra dimension from pixel_values if present
-            pixel_values = torch.stack([
-                ex["pixel_values"].squeeze(0) if ex["pixel_values"].ndim == 4 and ex["pixel_values"].shape[0] == 1 else ex["pixel_values"]
-                for ex in valid_examples
-            ])
+            def to_tensor_and_squeeze(pv):
+                if isinstance(pv, list):
+                    pv = torch.tensor(pv, dtype=torch.float32)
+                if isinstance(pv, torch.Tensor) and pv.ndim == 4 and pv.shape[0] == 1:
+                    pv = pv.squeeze(0)
+                return pv
+
+            def to_tensor_long(ids):
+                if isinstance(ids, list):
+                    ids = torch.tensor(ids, dtype=torch.long)
+                return ids
+
+            pixel_values = torch.stack([to_tensor_and_squeeze(ex["pixel_values"]) for ex in valid_examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            input_ids_2 = torch.stack([ex["input_ids_2"] for ex in valid_examples])
+            input_ids_2 = torch.stack([to_tensor_long(ex["input_ids_2"]) for ex in valid_examples])
 
-            # Return the batch dictionary for the model
             batch = {
                 "pixel_values": pixel_values,
                 "input_ids_2": input_ids_2,
