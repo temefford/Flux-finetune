@@ -73,21 +73,23 @@ def parse_args():
     # Store the path to the config file itself if needed later
     args.config_path = cmd_args.config 
 
-    # Convert cmd_args Namespace to dict for easier iteration
-    cmd_args_dict = vars(cmd_args)
-
-    # Override config values with any non-default command-line arguments
-    for key, value in cmd_args_dict.items():
+    # Merge command-line arguments into the config-based args
+    for key, value in vars(cmd_args).items():
         # Skip the config file path itself
         if key == 'config':
             continue
 
-        # Check if the cmd arg value is different from the parser's default
-        # This handles None for paths, specific values, and boolean flags
+        # Get the default value defined in the parser
         default_value = parser.get_default(key)
+
         if value != default_value:
+            # If CMD value is not the default, it overrides whatever is in config
             print(f"INFO: Overriding '{key}' with command-line value: {value}") # Use print
             setattr(args, key, value)
+        elif not hasattr(args, key):
+            # If CMD value is the default AND the key is not already in args (from config),
+            # ensure the default value is set in args.
+            setattr(args, key, default_value)
 
     # --- Post-merge adjustments specific to certain args ---
     # Use data_dir as dataset_path if dataset_path wasn't set by config or cmd line override
