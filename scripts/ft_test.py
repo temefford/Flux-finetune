@@ -22,6 +22,7 @@ from PIL import Image
 from tqdm.auto import tqdm
 
 import numpy as np # Import numpy for type checking
+import logging
 
 logger = get_logger(__name__)
 
@@ -135,6 +136,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         for i, path in enumerate(image_paths):
             try:
                 img = Image.open(path).convert("RGB")
+                logger.debug(f"Loaded image {os.path.basename(path)}: Mode={img.mode}, Size={img.size}, Format={img.format}")
                 images[i] = img
                 valid_indices.append(i)
             except IndexError as ie:
@@ -177,6 +179,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                 img_path = image_paths[img_idx]
                 try:
                     individual_input = image_transforms([img_to_process]) # Process as a batch of 1
+                    logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
                     pv_individual_maybe_numpy = individual_input['pixel_values']
                     if isinstance(pv_individual_maybe_numpy, np.ndarray):
                         processed_individual_tensors[img_idx] = torch.from_numpy(pv_individual_maybe_numpy).squeeze(0) # Remove batch dim
@@ -283,6 +286,14 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
 
 # --- Main Function ---
 def main(args):
+    # === Configure Logging ===
+    # Set level to DEBUG to capture image property logs
+    log_level = logging.DEBUG
+    log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    logging.basicConfig(level=log_level, format=log_format)
+    logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
+    # ========================
+
     # Initialize Accelerator
     logging_dir = Path(args.output_dir, "logs")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
