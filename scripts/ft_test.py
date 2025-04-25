@@ -257,8 +257,8 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         valid_item_idx = 0
         for original_idx in valid_indices:
             # Detach tensors before putting them in the list if they require gradients (unlikely here, but good practice)
-            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].detach()
-            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].detach()
+            pixel_values_list[original_idx] = pixel_values_valid_tensor[valid_item_idx].detach().tolist()
+            input_ids_list[original_idx] = input_ids_valid_tensor[valid_item_idx].detach().tolist()
             valid_item_idx += 1
 
         # --- Return Lists for Dataset Map --- #
