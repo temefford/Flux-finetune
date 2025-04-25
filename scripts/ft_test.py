@@ -457,6 +457,20 @@ def main(args):
         if not examples:
             return {}
 
+        # --- Debugging --- #
+        if examples:
+            first_example_pv = examples[0].get("pixel_values")
+            print(f"DEBUG collate_fn: Type of examples[0]['pixel_values']: {type(first_example_pv)}")
+            if isinstance(first_example_pv, torch.Tensor):
+                print(f"DEBUG collate_fn: Shape: {first_example_pv.shape}")
+            elif isinstance(first_example_pv, list):
+                print(f"DEBUG collate_fn: Length: {len(first_example_pv)}")
+                if first_example_pv:
+                    print(f"DEBUG collate_fn: Type of element 0: {type(first_example_pv[0])}")
+            else:
+                print(f"DEBUG collate_fn: Content: {first_example_pv}")
+        # --- End Debugging --- #
+
         # Access the tensor directly (assuming remove_columns fix worked)
         pixel_values = torch.stack([example["pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
