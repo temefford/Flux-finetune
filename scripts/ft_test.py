@@ -246,6 +246,7 @@ def preprocess_func(examples, **fn_kwargs):
 
 # --- Main Function ---
 def main(args):
+    logger.debug(f"Effective args.data_dir after parsing: {args.data_dir}")
     logging_dir = Path(args.output_dir, "logs")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
