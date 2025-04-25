@@ -441,7 +441,7 @@ def main(args):
     train_dataset = train_dataset.map(
         preprocess_func,
         batched=True,
-        num_proc=args.preprocessing_num_workers,
+        num_proc=1, # Changed from args.preprocessing_num_workers
         remove_columns=train_dataset.column_names,
         fn_kwargs=preprocess_kwargs # Pass variables here
     )
@@ -451,7 +451,7 @@ def main(args):
         val_dataset = val_dataset.map(
             preprocess_func,
             batched=True,
-            num_proc=args.preprocessing_num_workers,
+            num_proc=1, # Changed from args.preprocessing_num_workers
             remove_columns=val_dataset.column_names,
             fn_kwargs=preprocess_kwargs # Pass variables here too
         )
