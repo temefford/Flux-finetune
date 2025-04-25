@@ -30,24 +30,17 @@ import traceback
 ###############################################################################
 # helper: build txt-position ids that have the same width as img_ids
 ###############################################################################
-def make_img_ids(b, h, w, device):
-    """Return (B, h*w, 3) tensor with z=0, y, x indices."""
-    y, x = torch.meshgrid(
-        torch.arange(h, device=device),
-        torch.arange(w, device=device),
-        indexing="ij"
-    )
-    # z-axis is unused during 2-D training → fill with zeros
+def make_img_ids(h, w, device):
+    # (H*W, 3) with (z,y,x)
+    y, x = torch.meshgrid(torch.arange(h, device=device),
+                          torch.arange(w, device=device), indexing="ij")
     z = torch.zeros_like(y)
-    grid = torch.stack((z, y, x), dim=-1).view(-1, 3)      # (h*w, 3)
-    return grid.unsqueeze(0).repeat(b, 1, 1)               # (B, h*w, 3)
+    return torch.stack((z, y, x), dim=-1).view(-1, 3)
 
 def make_txt_ids(seq_len, device):
-    """Return (1, T, 3) tensor with x-position in the first column."""
+    # (T, 3) with (z,y,x) where y=z=0
     x = torch.arange(seq_len, device=device)
-    z = y = torch.zeros_like(x)
-    txt = torch.stack((z, y, x), dim=-1)                   # (T, 3)
-    return txt.unsqueeze(0)   
+    return torch.stack((torch.zeros_like(x), torch.zeros_like(x), x), dim=-1)
 
 
 # --- Argument Parsing ---
@@ -904,7 +897,7 @@ def main(args):
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
-                img_ids = make_img_ids(bsz, height, width, latents.device)
+                img_ids = make_img_ids(height, width, latents.device)
                 txt_ids = make_txt_ids(prompt_embeds_2.shape[1], latents.device)
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
@@ -1051,7 +1044,7 @@ def main(args):
                         latents_val = vae_to_transformer_projection(latents_val)
                     bsz_val, c_val, h_val, w_val = latents_val.shape
                     latents_reshaped_val = latents_val.permute(0, 2, 3, 1).reshape(bsz_val, h_val * w_val, c_val)
-                    img_ids_val = make_img_ids(bsz_val, h_val, w_val, latents_val.device)
+                    img_ids_val = make_img_ids(h_val, w_val, latents_val.device)
                     txt_ids_val = make_txt_ids(prompt_embeds_2.shape[1], latents_val.device)
                     logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
 
