@@ -28,7 +28,7 @@ image_column: "image"      # Column name for image file paths in metadata.json (
 caption_column: "caption"      # Column name for text captions in metadata.json
 dataset_type: "imagefolder"    # Type of dataset structure (imagefolder, hf_metadata, etc.)
 validation_split: 0.1                 # Percentage of data to use for validation (10%)
-validation_batch_size: 32      # Batch size for validation
+validation_batch_size: 2      # Batch size for validation
 max_train_steps: -1            # Max training steps (set to -1 to use epochs)
 
 # --- Removed Axolotl 'datasets' block ---
