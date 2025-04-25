@@ -52,6 +52,7 @@ def parse_args():
 
     # Create Namespace from YAML config
     args = argparse.Namespace(**config)
+    print(f"DEBUG: Args loaded from YAML: {vars(args)}") # <-- DEBUG PRINT
 
     # Apply command-line overrides (if provided)
     # Logging will happen in main() after accelerator is initialized
