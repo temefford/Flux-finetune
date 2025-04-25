@@ -409,8 +409,8 @@ def main(args):
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
-            # Target the Q, K, V projections based on printed names
-            target_modules=["to_q", "to_k", "to_v"], # Corrected target modules
+            # [Bug 1.4] Use correct FLUX attention module names
+            target_modules=["q_proj", "k_proj", "v_proj"],
             lora_dropout=0.1, # Optional dropout
             bias="none",
         )
@@ -452,7 +452,7 @@ def main(args):
             # Use Linear - WARNING: This likely requires reshaping latents BEFORE projection
             # Current code applies projection before reshaping, suitable for Conv2d
             logger.warning("Using 'linear' projection. Ensure latents are reshaped before this layer if needed.")
-            vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
+            vae_to_transformer_projection = torch.nn.Conv2d(vae_latent_channels_actual, transformer_in_channels_actual, 1)
         else:
             raise ValueError(f"Unsupported vae_projection_method: {projection_method}. Choose 'conv' or 'linear'.")
 
@@ -528,6 +528,12 @@ def main(args):
         # Ensure dataset_path is the directory containing metadata.jsonl
         data_files = {"train": os.path.join(args.dataset_path, "metadata.json")}
         dataset = load_dataset("json", data_files=data_files, split="train")
+        # Debug: Print first raw example and columns
+        try:
+            logger.info(f"First raw example: {dataset[0]}")
+        except Exception as e:
+            logger.error(f"Could not print first raw example: {e}")
+        logger.info(f"Dataset columns: {dataset.column_names}")
         # Filter dataset if filter_field and filter_value are provided
         if getattr(args, 'filter_field', None) and getattr(args, 'filter_value', None):
             logger.info(f"Filtering dataset: {getattr(args, 'filter_field', None)} == '{getattr(args, 'filter_value', None)}'")
@@ -568,9 +574,14 @@ def main(args):
             remove_columns=columns_to_remove,
             desc="Running tokenizer on train dataset",
         )
-
     elif args.dataset_type == "imagefolder":
         dataset = load_dataset("imagefolder", data_dir=args.dataset_path, split="train")
+        # Debug: Print first raw example and columns
+        try:
+            logger.info(f"First raw example: {dataset[0]}")
+        except Exception as e:
+            logger.error(f"Could not print first raw example: {e}")
+        logger.info(f"Dataset columns: {dataset.column_names}")
         dataset = dataset.shuffle(seed=args.seed)
         original_columns = dataset.column_names
         columns_to_keep = {args.image_column} # Only need image for imagefolder
@@ -592,6 +603,12 @@ def main(args):
         )
     else:
         raise ValueError(f"Unsupported dataset_type: {args.dataset_type}")
+
+    # Debug: Print first preprocessed example before filtering
+    try:
+        logger.info(f"First preprocessed example: {processed_dataset[0]}")
+    except Exception as e:
+        logger.error(f"Could not print first preprocessed example: {e}")
 
     # --- Filter out invalid examples after preprocessing --- #
     def is_valid(example):
@@ -682,11 +699,12 @@ def main(args):
         )
 
     # --- Learning Rate Scheduler ---
+    # [Bug 1.7] Build scheduler after max_train_steps is finalized
     lr_scheduler = get_scheduler(
         "cosine", # Common scheduler type
         optimizer=optimizer,
         num_warmup_steps=50, # Example warmup steps
-        num_training_steps=(len(train_dataloader) * args.epochs) // args.gradient_accumulation_steps,
+        num_training_steps=max_train_steps,
     )
 
     # --- Prepare with Accelerator ---
@@ -837,6 +855,7 @@ def main(args):
                         logger.warning("Could not find transformer.config.pooled_projection_dim, falling back to 768.")
                         expected_clip_dim = 768 # Fallback
 
+                    # [Bug 1.8] Ensure placeholder tensors use correct dtype (weight_dtype)
                     clip_pooled = torch.zeros(batch_size, expected_clip_dim, dtype=weight_dtype, device=accelerator.device)
                     logger.warning(f"clip_pooled was None, created placeholder with expected dim {expected_clip_dim}: {clip_pooled.shape}")
                 else:
@@ -848,6 +867,7 @@ def main(args):
                 # VAE is prepared by accelerator, handles device/dtype internally via hooks/casting
                 latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
+{{ ... }}
 
                 latents = latents * vae.config.scaling_factor
                 # No need for .to(accelerator.device) here, accelerator handles it
@@ -932,16 +952,17 @@ def main(args):
                      logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
 
                 # Pass arguments explicitly
+                # [Bug 1.2] Add noise to latents before predicting
+                latents_noisy = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
+                # [Bug 1.1] Use .sample from ModelOutput for loss
                 model_pred = transformer(
-                    hidden_states=latents_reshaped,
+                    hidden_states=latents_noisy,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds_2,
                     pooled_projections=clip_pooled,
                     img_ids=img_ids,
-                    txt_ids=input_ids_2 # Pass the placeholder tensor
-                )
-
-                # Assume prediction target is the noise (epsilon prediction)
+                    txt_ids=input_ids_2
+                ).sample
                 target = noise
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
@@ -1015,6 +1036,20 @@ def main(args):
                     pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype)
                     bsz = pixel_values_device.shape[0]
 
+                    # [Bug 1.3] Recompute latents, latents_reshaped, img_ids, noise for each val batch
+                    latents_val = vae.encode(pixel_values_device).latent_dist.sample() * vae.config.scaling_factor
+                    if vae_to_transformer_projection is not None:
+                        latents_val = vae_to_transformer_projection(latents_val)
+                    bsz_val, c_val, h_val, w_val = latents_val.shape
+                    latents_reshaped_val = latents_val.permute(0, 2, 3, 1).reshape(bsz_val, h_val * w_val, c_val)
+                    img_ids_1d_val = torch.arange(h_val * w_val, device=latents_val.device)
+                    img_ids_val = img_ids_1d_val.repeat(bsz_val, 1)
+                    logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
+
+                    # Sample noise and timesteps for validation
+                    noise_val = torch.randn_like(latents_reshaped_val)
+                    timesteps_val = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz_val,), device=latents_val.device).long()
+
                     # Prepare validation inputs (similar logic to training)
                     input_ids_2_device = None
                     prompt_embeds_2_device = None
@@ -1043,22 +1078,11 @@ def main(args):
                             prompt_embeds_2_device = prompt_embeds_2_outputs.last_hidden_state
                         # Else: prompt_embeds_2 remains None
 
-                    # Generate correct 1D img_ids for validation
-                    seq_len_val = bsz * 64 # Assuming 64x64 images
-                    img_ids_1d_val = torch.arange(seq_len_val, device=latents.device)
-                    img_ids_val = img_ids_1d_val.repeat(bsz, 1) # Use bsz
-                    logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
-
-                    # Sample noise and timesteps for validation
-                    noise = torch.randn_like(latents_reshaped)
-                    bsz = pixel_values_device.shape[0]
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
-                    timesteps = timesteps.long()
-
-                    # Predict noise using the model
+                    # [Bug 1.2] Add noise to latents for validation as well
+                    latents_noisy_val = noise_scheduler.add_noise(latents_reshaped_val, noise_val, timesteps_val)
                     model_pred_val = transformer(
-                        hidden_states=latents_reshaped,
-                        timestep=timesteps,
+                        hidden_states=latents_noisy_val,
+                        timestep=timesteps_val,
                         encoder_hidden_states=prompt_embeds_2_device, # T5 sequence embeds (None for img-only)
                         pooled_projections=clip_pooled_device, # CLIP pooled embeds (placeholder for img-only)
                         txt_ids=input_ids_2_device, # Pass the variable prepared earlier (None for image-only)
@@ -1066,7 +1090,7 @@ def main(args):
                     ).sample
 
                     # Assume target is noise for validation loss calculation
-                    target = noise
+                    target = noise_val
                     loss = F.mse_loss(model_pred_val.float(), target.float(), reduction="mean")
 
                     val_loss = loss.item() # Get loss for the current batch
