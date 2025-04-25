@@ -55,10 +55,18 @@ def parse_args():
     # Create Namespace from YAML config first
     args = argparse.Namespace(**config)
 
+    # --- Map config keys to expected attribute names --- #
+    # Ensure dataset_path is populated from data_dir in config if it exists
+    if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
+        args.dataset_path = args.data_dir
+        logging.info(f"Using data_dir '{args.data_dir}' from config as dataset_path.")
+    # Similarly, map model_id if needed by other parts of the script
+    # (Add other mappings here if config keys differ from script attributes)
+
     # --- Apply command-line overrides --- #
     # Override specific keys if they were provided via command line
     if cmd_args.data_dir:
-        args.dataset_path = cmd_args.data_dir # Config key is dataset_path
+        args.dataset_path = cmd_args.data_dir # Override whatever was set from config
         logging.info(f"Overriding dataset_path with command-line value: {args.dataset_path}")
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
@@ -73,7 +81,7 @@ def parse_args():
     # --- Ensure essential args exist and perform adjustments --- #
     # Validate required args that might not have defaults
     if not hasattr(args, 'dataset_path') or not args.dataset_path:
-        raise ValueError("dataset_path must be specified in the config file or via --data_dir")
+        raise ValueError("dataset_path must be specified in the config file (as data_dir or dataset_path) or via --data_dir")
     if not hasattr(args, 'output_dir') or not args.output_dir:
         raise ValueError("output_dir must be specified in the config file or via --output_dir")
 
