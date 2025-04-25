@@ -404,8 +404,13 @@ def main(args):
         original_columns = dataset.column_names
         # Keep necessary columns: image, caption, hash (maybe others based on config)
         # Columns needed by preprocess_train: image_column, hash_column, caption_column
-        columns_to_keep = {args.image_column, args.hash_column, args.caption_column}
+        columns_to_keep = {args.image_column, args.caption_column} # Start with essential ones
+        # Add hash_column only if it exists and is different from image_column (optional)
+        hash_column_val = getattr(args, 'hash_column', None)
+        if hash_column_val: # Only add if defined in args
+             columns_to_keep.add(hash_column_val)
         columns_to_remove = [col for col in original_columns if col not in columns_to_keep]
+        logger.info(f"Columns to keep: {columns_to_keep}")
         logger.info(f"Columns to remove: {columns_to_remove}")
 
         # --- Prepare Preprocessing Function --- #
@@ -415,7 +420,7 @@ def main(args):
             # Pass the image processor's preprocess method directly
             image_transforms=pipeline.image_processor.preprocess,
             image_column=args.image_column,
-            hash_column=args.hash_column,
+            hash_column=getattr(args, 'hash_column', None), # Pass hash_column if defined, else None
             caption_column=args.caption_column,
             tokenizer_2=tokenizer_2,
         )
@@ -635,11 +640,11 @@ def main(args):
 
                 # Create null T5 input IDs if still None
                 if input_ids_2 is None:
-                    input_ids_2 = torch.zeros(
-                        (batch_size, 1),
-                        dtype=torch.long, device=accelerator.device
-                    )
-                    logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
+                     input_ids_2 = torch.zeros(
+                         (batch_size, 1),
+                         dtype=torch.long, device=accelerator.device
+                     )
+                     logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
             # --- Handle Missing Conditioning Inputs (Create Placeholders) --- #
             # Get expected embedding dimensions and null sequence length
