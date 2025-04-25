@@ -714,6 +714,14 @@ def main(args):
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
+                logger.debug(f"  transformer input shape - latents_reshaped: {latents_reshaped.shape}")
+                logger.debug(f"  transformer input shape - timestep: {timesteps.shape}")
+                logger.debug(f"  transformer input type - encoder_hidden_states: {type(prompt_embeds_2)}")
+                logger.debug(f"  transformer input shape - encoder_hidden_states: {prompt_embeds_2.shape if prompt_embeds_2 is not None else 'None'}")
+                logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled.shape}")
+                logger.debug(f"  transformer input type - txt_ids: {type(input_ids_2)}")
+                logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape if input_ids_2 is not None else 'None'}")
+                logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
                 model_pred = transformer(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
@@ -841,7 +849,7 @@ def main(args):
                     model_pred_val = transformer(
                         latents_reshaped_val,
                         timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds_2,
+                        encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
                         txt_ids=val_batch["input_ids_2"], # Re-added T5 token IDs
                         img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
