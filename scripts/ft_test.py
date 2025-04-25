@@ -126,12 +126,12 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         hash_column = image_column        # <- use image_column as backup
     image_root = dataset_abs_path
     if hash_column and hash_column in examples:
-        image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[hash_column]]
+        image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[image_column]]
         logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
     elif image_column in examples:
         # Assuming image_column contains filenames like 'image_001.jpg'
         # Construct path using dataset_abs_path directly
-        image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[hash_column]]
+        image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[image_column]]
         logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
     else:
         logger.error(f"Missing required image identifier column ('{image_column}' or '{hash_column}') in examples.")
@@ -175,16 +175,18 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
             logger.debug(f"Type of image_inputs: {type(image_inputs)}")
             if isinstance(image_inputs, dict) and 'pixel_values' in image_inputs:
                 pixel_values_maybe_numpy = image_inputs['pixel_values']
-                logger.debug(f"Type of pixel_values_maybe_numpy: {type(pixel_values_maybe_numpy)}; Shape: {getattr(pixel_values_maybe_numpy, 'shape', None)}")
-                if isinstance(pixel_values_maybe_numpy, np.ndarray):
-                    pixel_values_valid_tensor = torch.from_numpy(pixel_values_maybe_numpy)
-                elif isinstance(pixel_values_maybe_numpy, torch.Tensor):
-                    pixel_values_valid_tensor = pixel_values_maybe_numpy
-                else:
-                    raise TypeError(f"Unexpected type from batch image processor: {type(pixel_values_maybe_numpy)}")
+                # <- fall through to conversion logic below
+            elif isinstance(image_inputs, torch.Tensor):
+                # New – current diffusers returns a tensor directly
+                pixel_values_valid_tensor = image_inputs          # [B,C,H,W]
+            elif isinstance(image_inputs, np.ndarray):
+                pixel_values_valid_tensor = torch.from_numpy(image_inputs)
             else:
-                logger.warning(f"image_inputs did not contain 'pixel_values' or was not a dict. Type: {type(image_inputs)}. Keys: {getattr(image_inputs, 'keys', lambda: None)()}.")
-                raise TypeError(f"image_inputs did not contain 'pixel_values' or was not a dict.")
+                logger.warning(
+                    f"image_inputs of unexpected type: {type(image_inputs)}  "
+                    "(neither dict nor Tensor); skipping batch."
+                )
+                raise TypeError("Unexpected image_inputs type")
 
         except IndexError as batch_ie:
             logger.warning(f"Batch image processing failed with IndexError: {batch_ie}. Falling back to individual processing to identify culprit(s).")
