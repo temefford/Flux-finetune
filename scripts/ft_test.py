@@ -106,61 +106,101 @@ def parse_args():
     return args
 
 # --- Data Preprocessing Helper Functions ---
-def tokenize_captions(captions, tokenizer):
-    """Tokenizes captions using the provided tokenizer."""
-    try:
-        # FLUX uses a single T5 tokenizer for the second text input (input_ids_2)
-        # Remove the assumption of unpacking two tokenizers
-        # clip_tokenizer, t5_tokenizer = tokenizer # <-- REMOVE THIS LINE
-
-        # Directly use the passed tokenizer (which should be tokenizer_2 from the pipeline)
-        inputs = tokenizer(
-            captions,
-            max_length=tokenizer.model_max_length, # Use the tokenizer's max length
-            padding="max_length", # Pad to max length
-            truncation=True,
-            return_tensors="pt",
-        )
-        return inputs.input_ids # Return only the input_ids
-    except Exception as e:
-        logger.error(f"Error during caption tokenization: {e}")
-        # Depending on desired behavior, either return None/empty tensor or raise
-        raise e # Re-raise for now
-
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, caption_column, tokenizer_2):
-    """Preprocesses a batch of training examples for datasets.map."""
+    """Preprocesses a batch of training examples using standard batched processing."""
+    image_paths = [os.path.join(dataset_abs_path, f"{fn}.jpg") for fn in examples[image_column]]
+    batch_size = len(image_paths)
+
     try:
         # Load images
-        images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
+        images = [Image.open(path).convert("RGB") for path in image_paths] # List of PIL Images
 
-        # Apply transforms - result is a list of tensors
-        pixel_values_list = [image_transforms(image)[0] for image in images]
+        # Process image batch -> returns dict {'pixel_values': tensor[B, C, H, W]}
+        # Note: image_transforms is assumed to be pipeline.image_processor.preprocess
+        image_inputs = image_transforms(images, return_tensors="pt")
+        pixel_values_batch_tensor = image_inputs['pixel_values'] # Tensor [B, C, H, W]
 
-        # Tokenize captions
-        captions = list(examples[caption_column])
-        captions = [str(c) if c is not None else "" for c in captions]
-        # tokenize_captions returns a tensor [batch, seq_len]
-        text_inputs_2_tensor = tokenize_captions(captions, tokenizer_2)
+        # Process text batch
+        captions = [str(c) if c is not None else "" for c in examples[caption_column]]
+        # Tokenizer returns dict {'input_ids': tensor[B, SeqLen], ...}
+        # Ensure tokenizer_2 has model_max_length set or use a default
+        max_len = getattr(tokenizer_2, 'model_max_length', 512) # Example default
+        text_inputs = tokenizer_2(
+            captions,
+            padding="max_length",
+            max_length=max_len,
+            truncation=True,
+            return_tensors="pt"
+        )
+        input_ids_2_batch_tensor = text_inputs['input_ids'] # Tensor [B, SeqLen]
 
-        # Return a dictionary where values are lists matching the batch size
+        # Convert batch tensors to lists for dataset.map compatibility
+        # Unbind tensor [B, C, H, W] into list [tensor[C,H,W], tensor[C,H,W], ...]
+        pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
+        # Convert tensor [B, SeqLen] into list [[id1, ...], [id2, ...], ...]
+        input_ids_2_list_of_lists = input_ids_2_batch_tensor.tolist()
+
+        # Sanity check lengths
+        if len(pixel_values_list_of_tensors) != batch_size or len(input_ids_2_list_of_lists) != batch_size:
+            logger.error(f"Batch size mismatch after processing in preprocess_train. Expected {batch_size}, got {len(pixel_values_list_of_tensors)} images and {len(input_ids_2_list_of_lists)} texts.")
+            # Handle error appropriately - maybe return None lists?
+            return {
+                "pixel_values": [None] * batch_size,
+                "input_ids_2": [None] * batch_size,
+            }
+
         return {
-            "pixel_values": pixel_values_list,
-            "input_ids_2": text_inputs_2_tensor.tolist() # Convert tensor to list of lists
+            "pixel_values": pixel_values_list_of_tensors,
+            "input_ids_2": input_ids_2_list_of_lists,
         }
 
     except FileNotFoundError as e:
-        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
-        # Return empty structure or raise, depending on desired robustness
-        # Returning structure matching keys might prevent some errors downstream
-        batch_size = len(examples[image_column]) # Determine batch size from input
+        logger.error(f"Error opening image file: {e}. Skipping batch.")
+        # Return structure with Nones matching batch size
         return {
             "pixel_values": [None] * batch_size,
             "input_ids_2": [None] * batch_size,
         }
     except Exception as e:
-        logger.error(f"Error during image preprocessing: {e}")
-        # Similar error handling as above
-        batch_size = len(examples[image_column])
+        logger.error(f"Error during preprocessing batch: {e}")
+        # Return structure with Nones matching batch size
+        return {
+            "pixel_values": [None] * batch_size,
+            "input_ids_2": [None] * batch_size,
+        }
+
+def preprocess_imagefolder(examples, image_transforms, image_column):
+    """Preprocesses a batch of training examples for 'imagefolder' datasets."""
+    batch_size = len(examples[image_column])
+    try:
+        # Load images (assuming examples[image_column] contains PIL images)
+        images = [image.convert("RGB") for image in examples[image_column]]
+
+        # Process image batch
+        image_inputs = image_transforms(images, return_tensors="pt")
+        pixel_values_batch_tensor = image_inputs['pixel_values']
+
+        # Convert batch tensor to list of tensors
+        pixel_values_list_of_tensors = [t for t in pixel_values_batch_tensor]
+
+        # For image-only, create dummy/None text inputs (list of lists)
+        # Ensure tokenizer_2 is available or define max_len
+        # max_len = 77 # Or get from tokenizer if available
+        # input_ids_2_list_of_lists = [[tokenizer_2.pad_token_id] * max_len] * batch_size
+        input_ids_2_list_of_lists = [[0]] * batch_size # Simpler placeholder if tokenizer not needed/available here
+
+        # Sanity check lengths
+        if len(pixel_values_list_of_tensors) != batch_size:
+            logger.error(f"Batch size mismatch for images in preprocess_imagefolder. Expected {batch_size}, got {len(pixel_values_list_of_tensors)}.")
+            return {"pixel_values": [None] * batch_size, "input_ids_2": [None] * batch_size}
+
+        return {
+            "pixel_values": pixel_values_list_of_tensors,
+            "input_ids_2": input_ids_2_list_of_lists, # Return placeholder
+        }
+
+    except Exception as e:
+        logger.error(f"Error during imagefolder preprocessing batch: {e}")
         return {
             "pixel_values": [None] * batch_size,
             "input_ids_2": [None] * batch_size,
@@ -474,54 +514,22 @@ def main(args):
 
     # Collate function
     def collate_fn(examples):
-        # Handle potential variations in pixel_values structure
-        pixel_values_to_stack = []
-        for i, example in enumerate(examples):
-            pv = example.get("pixel_values")
-            if isinstance(pv, torch.Tensor):
-                pixel_values_to_stack.append(pv)
-            elif isinstance(pv, list) and len(pv) == 1 and isinstance(pv[0], torch.Tensor):
-                # If it's a list containing a single tensor (possibly from map fn behavior)
-                pixel_values_to_stack.append(pv[0])
-            elif pv is None:
-                 logger.warning(f"Found None for pixel_values in example {i} during collation. Skipping.")
-                 # Decide how to handle None: skip example, raise error, use placeholder?
-                 # For now, let's try skipping, but this might cause batch size mismatches.
-                 # A better approach might be to ensure preprocess_train doesn't return None.
-                 continue # Or raise error
-            else:
-                # Log the unexpected type/structure
-                logger.error(f"Unexpected type or structure for pixel_values in example {i}: {type(pv)}")
-                if isinstance(pv, list):
-                    logger.error(f"  List length: {len(pv)}")
-                    if pv:
-                         logger.error(f"  First element type: {type(pv[0])}")
-                raise TypeError(f"Unexpected type for pixel_values in collate_fn: {type(pv)}")
+        # Filter out examples where preprocessing might have failed (returned None)
+        valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
 
-        if not pixel_values_to_stack:
-             if examples: # If input examples existed but all had invalid pixel_values
-                 raise ValueError("Could not extract any valid pixel_values tensors for stacking in collate_fn.")
-             else: # If input examples list was empty
-                 return {} # Return empty dict if no examples
+        if not valid_examples:
+            return {} # Return empty batch if all examples failed
 
-        # Stack the validated/extracted tensors
-        pixel_values = torch.stack(pixel_values_to_stack)
+        # Examples should now have 'pixel_values' as tensor, 'input_ids_2' as list
+        pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        # Ensure input_ids_2 are correctly handled
-        # preprocess_train returns a list of lists; convert each list back to a tensor
-        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples if example.get("pixel_values") is not None]) # Ensure we only take ids for valid images
-
-        # Check for batch size consistency if examples were skipped
-        if pixel_values.shape[0] != input_ids_2.shape[0]:
-            raise ValueError(
-                f"Batch size mismatch after collation: pixel_values has {pixel_values.shape[0]}, "
-                f"input_ids_2 has {input_ids_2.shape[0]}. This might be due to skipping examples with None pixel_values."
-            )
+        # Convert list of lists for input_ids_2 back to tensor
+        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in valid_examples])
 
         return {
             "pixel_values": pixel_values,
-            "input_ids_2": input_ids_2, # Only include the keys produced by preprocess_train
+            "input_ids_2": input_ids_2,
         }
 
     train_dataloader = torch.utils.data.DataLoader(
