@@ -10,38 +10,80 @@ import diffusers
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
-import transformers
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import ProjectConfiguration, set_seed
 from datasets import load_dataset
 from diffusers import FluxPipeline
-from diffusers.loaders import LoraLoaderMixin
 from diffusers.optimization import get_scheduler
-from diffusers.utils.torch_utils import is_compiled_module
 from peft import LoraConfig, PeftModel
-from peft.utils import get_peft_model_state_dict
 from PIL import Image
 from torchvision import transforms
 from tqdm.auto import tqdm
-from transformers import AutoTokenizer
 
 logger = get_logger(__name__, log_level="INFO")
 
 # --- Argument Parsing ---
-def parse_args(config_path):
-    with open(config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    # Simple conversion to Namespace for dot notation access
+def parse_args():
+    parser = argparse.ArgumentParser(description="Simple example of a FLUX training script.")
+    parser.add_argument(
+        "--config",
+        type=str,
+        default="configs/ft_config.yaml",
+        help="Path to the configuration YAML file relative to the project root.",
+    )
+    # Add arguments for data_dir and output_dir to potentially override config
+    parser.add_argument("--data_dir", type=str, default=None, help="Override dataset path from config.")
+    parser.add_argument("--output_dir", type=str, default=None, help="Override output directory from config.")
+
+    cmd_args = parser.parse_args() # Parse command line args first
+
+    # Load config from YAML file
+    try:
+        with open(cmd_args.config, 'r') as f:
+            config = yaml.safe_load(f)
+    except FileNotFoundError:
+        logging.error(f"Configuration file not found at: {cmd_args.config}")
+        raise
+    except Exception as e:
+        logging.error(f"Error loading configuration file {cmd_args.config}: {e}")
+        raise
+
+    # Create Namespace from YAML config
     args = argparse.Namespace(**config)
-    # Resolve relative paths from config location
-    config_dir = Path(config_path).parent
-    args.output_dir = str(config_dir / args.output_dir)
-    args.dataset_path = str(config_dir / args.dataset_path)
+
+    # Apply command-line overrides (if provided)
+    # Logging will happen in main() after accelerator is initialized
+    if cmd_args.data_dir:
+        args.dataset_path = cmd_args.data_dir # Note: config key is dataset_path
+    if cmd_args.output_dir:
+        args.output_dir = cmd_args.output_dir
+
+    # --- Path Adjustments --- 
+    # Make output_dir relative to the project root (where the script is run from)
+    # Assuming the script is run from the 'finetuning' directory
+    # No adjustment needed if output_dir is already relative like 'outputs'
+    # If output_dir was specified as absolute in YAML or command line, it stays absolute.
+    # Let's ensure it exists
+    if not os.path.isabs(args.output_dir):
+        args.output_dir = os.path.abspath(args.output_dir)
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    # Ensure dataset_path is treated as absolute if needed (e.g., /workspace/art)
+    # The config expects an absolute path, so no adjustment needed unless overridden
+    if not hasattr(args, 'dataset_path') or not args.dataset_path:
+         raise ValueError("dataset_path must be specified in the config file or via --data_dir")
+
+    # Add other defaults if missing from config
+    args.config_path = cmd_args.config # Store the actual config path used
+    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
+    args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
+
     return args
 
-# --- Data Preprocessing ---
+# --- Data Preprocessing Helper Functions ---
 def tokenize_captions(tokenizer, examples, text_column="text"):
     """Tokenizes captions from the specified text column using both CLIP and T5 tokenizers.
 
@@ -87,21 +129,22 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
         "attention_mask_2": attention_mask_2,
     }
 
-def preprocess_train(examples, dataset_abs_path, image_transforms):
+def preprocess_train(examples, dataset_abs_path, image_transforms, image_column):
     """Preprocesses a batch of training examples."""
     try:
-        # Construct absolute path for images
-        images = [Image.open(os.path.join(dataset_abs_path, fn)).convert("RGB") for fn in examples["file_name"]]
+        image_dir = os.path.join(dataset_abs_path, "imgs")
+        # Append .jpg to the hash value retrieved using image_column
+        images = [Image.open(os.path.join(image_dir, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
         examples["pixel_values"] = [image_transforms(image) for image in images]
     except FileNotFoundError as e:
-        logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
+        logging.error(f"Error opening image: {e}. Check dataset_path and file names.")
         # Decide how to handle: skip batch, raise error, etc.
         # For now, let's add a placeholder or skip - adding None might cause issues later
         # Safest might be to ensure paths are correct before this step.
         # Re-raising for now to make the error visible.
         raise e
     except Exception as e:
-        logger.error(f"Error during image preprocessing: {e}")
+        logging.error(f"Error during image preprocessing: {e}")
         raise e
     return examples
 
@@ -117,6 +160,23 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # Log overrides now that accelerator is initialized
+    if hasattr(args, 'config_path'): # Check if config was successfully loaded
+        if args.config_path != 'configs/ft_config.yaml': # Log if not default
+             logger.info(f"Using configuration file: {args.config_path}", main_process_only=True)
+        # Check if paths were overridden (by comparing with originally loaded values if we stored them, or just checking if cmd_args existed - easier)
+        # Simplest: Check if the override args were passed (we need to get cmd_args again or pass them)
+        # Let's re-parse minimal args just for checking overrides
+        parser = argparse.ArgumentParser(add_help=False) # Don't add help again
+        parser.add_argument("--data_dir", type=str, default=None)
+        parser.add_argument("--output_dir", type=str, default=None)
+        cmd_override_args, _ = parser.parse_known_args() # Parse only known args
+
+        if cmd_override_args.data_dir:
+            logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}", main_process_only=True)
+        if cmd_override_args.output_dir:
+             logger.info(f"Overriding output_dir with command-line value: {args.output_dir}", main_process_only=True)
+
     # Make one log on every process with the configuration for debugging.
     logging.basicConfig(
         format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
@@ -126,11 +186,9 @@ def main(args):
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
-        transformers.utils.logging.set_verbosity_warning()
         diffusers.utils.logging.set_verbosity_info()
     else:
         datasets.utils.logging.set_verbosity_error()
-        transformers.utils.logging.set_verbosity_error()
         diffusers.utils.logging.set_verbosity_error()
 
     if args.seed is not None:
@@ -141,33 +199,64 @@ def main(args):
         if args.output_dir is not None:
             os.makedirs(args.output_dir, exist_ok=True)
 
+    # Determine weight dtype based on mixed precision setting
+    if args.mixed_precision == "fp16":
+        weight_dtype = torch.float16
+    elif args.mixed_precision == "bf16":
+        weight_dtype = torch.bfloat16
+    else:
+        weight_dtype = torch.float32 # Default to float32 if 'no' or unspecified
+    logger.info(f"Using weight dtype: {weight_dtype}")
+
     # --- Load Models and Tokenizers ---
-    # FLUX uses multiple components, specific loading might differ slightly
-    # Based on common patterns, adjust if FLUX requires specific handling
     try:
-        pipe = FluxPipeline.from_pretrained(args.model_id, torch_dtype=torch.float16 if args.mixed_precision == "fp16" else torch.float32)
-        tokenizer = (pipe.tokenizer, pipe.tokenizer_2)
-        text_encoder = (pipe.text_encoder, pipe.text_encoder_2)
-        vae = pipe.vae
-        unet = pipe.transformer # FLUX uses 'transformer' instead of 'unet'
-        scheduler = pipe.scheduler # Use the scheduler from the pipeline
-        logger.info("Loaded FLUX model components.")
+        # Load scheduler, tokenizer and models.
+        # FLUX uses a specific pipeline structure
+        logger.info("Loading base model pipeline...")
+        pipeline = FluxPipeline.from_pretrained(
+            args.model_id, # Use model_id from config
+            revision=getattr(args, 'revision', None), # Safely get revision, default to None
+            torch_dtype=weight_dtype, # Use weight_dtype here during initial load
+        )
+        logger.info("Pipeline loaded.")
+
+        # Extract components
+        noise_scheduler = pipeline.scheduler
+        vae = pipeline.vae
+        text_encoder = pipeline.text_encoder
+        text_encoder_2 = pipeline.text_encoder_2
+        transformer = pipeline.transformer # This is the main model to fine-tune
+        logger.info("Model components extracted.")
+
+        # Move VAE to device and cast dtype
+        vae.to(accelerator.device, dtype=weight_dtype)
+        logger.info(f"VAE moved to device {accelerator.device} and cast to {weight_dtype}")
+
+        # Log channel configurations to debug potential mismatch
+        logger.info(f"Transformer class: {transformer.__class__.__name__}")
+        logger.info(f"VAE configured latent channels: {vae.config.latent_channels}")
+        logger.info(f"Transformer configured input channels: {transformer.config.in_channels}")
+        logger.info(f"Transformer cross_attention_dim: {getattr(transformer.config, 'cross_attention_dim', 'N/A')}") # Added logging
+        logger.info("Transformer x_embedder weight shape: N/A") # Placeholder, adjust if needed
+
+        tokenizer = pipeline.tokenizer
+        tokenizer_2 = pipeline.tokenizer_2
+        logger.info("Tokenizers extracted.")
+
     except Exception as e:
-        logger.error(f"Failed to load FLUX model components: {e}")
-        logger.error("Ensure you have 'transformers', 'diffusers', 'torch' installed and are logged in to Hugging Face Hub if needed.")
-        logger.error("Also check the model identifier: {args.model_id}")
+        logger.error(f"Failed to load models or components: {e}")
         return
 
     # Freeze VAE and text_encoder
     vae.requires_grad_(False)
-    text_encoder[0].requires_grad_(False)
-    text_encoder[1].requires_grad_(False)
-    unet.requires_grad_(False) # Start with UNet frozen, LoRA will unfreeze target modules
+    text_encoder.requires_grad_(False)
+    text_encoder_2.requires_grad_(False)
+    transformer.requires_grad_(False) # Start with transformer frozen, LoRA will unfreeze target modules
 
-    # --- Add LoRA to UNet (Transformer in FLUX) ---
+    # --- Add LoRA to transformer (UNet equivalent) ---
     if args.peft_method == "LoRA":
-        logger.info("Adding LoRA layers to the Transformer (UNet equivalent).")
-        unet_lora_config = LoraConfig(
+        logger.info("Adding LoRA layers to the transformer (UNet equivalent).")
+        transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
             # Target the Q, K, V projections based on printed names
@@ -175,20 +264,44 @@ def main(args):
             lora_dropout=0.1, # Optional dropout
             bias="none",
         )
-        unet.add_adapter(unet_lora_config)
+        transformer.add_adapter(transformer_lora_config)
         # Ensure LoRA layers are float32 for stability if using mixed precision
         if args.mixed_precision == "fp16":
-             for name, param in unet.named_parameters():
+             for name, param in transformer.named_parameters():
                 if "lora_" in name:
                     param.data = param.data.to(torch.float32)
-        logger.info(f"Added LoRA with rank {args.lora_rank} to {unet_lora_config.target_modules}")
+        logger.info(f"Added LoRA with rank {args.lora_rank} to {transformer_lora_config.target_modules}")
 
     else:
         logger.warning(f"PEFT method '{args.peft_method}' not implemented for this script. Training full model.")
-        unet.requires_grad_(True) # Train full UNet if not LoRA
+        transformer.requires_grad_(True) # Train full transformer if not LoRA
 
-    # --- Optimizer Setup ---
-    params_to_optimize = list(filter(lambda p: p.requires_grad, unet.parameters()))
+    # --- Define Projection Layer for VAE->Transformer Channel Mismatch ---
+    # Based on confirmed config values and runtime checks
+    vae_latent_channels_actual = vae.config.latent_channels # Should be 16
+    transformer_in_channels_actual = transformer.config.in_channels # Should be 64
+ 
+    if vae_latent_channels_actual != transformer_in_channels_actual:
+        logger.warning(
+            f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, "
+            f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
+        )
+        vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
+        vae_to_transformer_projection.to(accelerator.device, dtype=weight_dtype)
+    else:
+        # This case seems unlikely given the error, but included for completeness
+        logger.info("VAE output and Transformer input channels match according to configs.")
+        vae_to_transformer_projection = None
+ 
+    # --- Optimizer Setup --- 
+    params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
+    if vae_to_transformer_projection is not None:
+        # Ensure projection layer params require grad and add them
+        for param in vae_to_transformer_projection.parameters():
+            param.requires_grad = True 
+        params_to_optimize.extend(vae_to_transformer_projection.parameters())
+        logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
+
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=float(args.learning_rate), # Ensure learning_rate is float
@@ -248,9 +361,10 @@ def main(args):
     # Define the preprocessing function with necessary arguments captured
     def preprocess_func(examples):
         # Tokenize captions using the 'artwork' field
-        captions = tokenize_captions(tokenizer, examples, text_column="artwork")
+        # Pass the actual tokenizers, not the text encoders
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
         # Preprocess images using the absolute path
-        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms)
+        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms, args.image_column)
 
         # Combine results
         output = {
@@ -328,29 +442,27 @@ def main(args):
     # Prepare relevant items (handle val_dataloader conditionally)
     logger.info("Preparing models and dataloaders with Accelerator...")
     if val_dataloader:
-        unet, optimizer, train_dataloader, lr_scheduler, val_dataloader = accelerator.prepare(
-            unet, optimizer, train_dataloader, lr_scheduler, val_dataloader
+        transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader = accelerator.prepare(
+            transformer, optimizer, train_dataloader, lr_scheduler, val_dataloader
         )
     else:
-        unet, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
-            unet, optimizer, train_dataloader, lr_scheduler
+        transformer, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
+            transformer, optimizer, train_dataloader, lr_scheduler
         )
 
-    # Move vae and text_encoder to device
-    vae.to(accelerator.device)
-    text_encoder[0].to(accelerator.device)
-    text_encoder[1].to(accelerator.device)
-    if args.mixed_precision == "fp16":
-        vae.to(dtype=torch.float16)
-        # Text encoder precision depends on the model, often kept in fp32 or needs specific handling
-        # text_encoder.to(dtype=torch.float16)
+    # Move text_encoder to device
+    text_encoder.to(accelerator.device)
+    text_encoder_2.to(accelerator.device)
 
-    # --- Training Loop ---
+    # --- Calculate Training Steps --- 
     num_update_steps_per_epoch = math.ceil(len(train_dataloader) / args.gradient_accumulation_steps)
-    max_train_steps = args.epochs * num_update_steps_per_epoch
     if args.max_train_steps is not None and args.max_train_steps > 0:
-        max_train_steps = min(max_train_steps, args.max_train_steps)
-        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch)
+        max_train_steps = args.max_train_steps
+        args.epochs = math.ceil(max_train_steps / num_update_steps_per_epoch) # Recalculate epochs based on max_train_steps
+        logger.info(f"Training for a fixed {max_train_steps} steps, overriding epochs to {args.epochs}.")
+    else:
+        max_train_steps = args.epochs * num_update_steps_per_epoch
+        logger.info(f"Training for {args.epochs} epochs, corresponding to {max_train_steps} steps.")
 
     total_batch_size = args.batch_size * accelerator.num_processes * args.gradient_accumulation_steps
 
@@ -378,84 +490,84 @@ def main(args):
     training_start_time = time.time()
 
     for epoch in range(first_epoch, args.epochs):
-        unet.train()
+        transformer.train()
         train_loss = 0.0
         steps_in_epoch = 0 # Track optimization steps within the epoch
         images_processed_epoch = 0 # Track images processed in this epoch
         epoch_start_time = time.time() # Record time at the start of the epoch
 
         for step, batch in enumerate(train_dataloader):
-            with accelerator.accumulate(unet):
+            with accelerator.accumulate(transformer): # Use transformer here
                 # Convert images to latent space
-                with torch.no_grad():
-                    # Check if VAE is a compiled module
-                    if is_compiled_module(vae):
-                        latents = vae.encode(batch["pixel_values"].to(accelerator.device, dtype=vae.dtype)).latent_dist.sample()
-                    else:
-                         latents = vae.encode(batch["pixel_values"].to(accelerator.device, dtype=vae.dtype)).latent_dist.sample()
-                    latents = latents * vae.config.scaling_factor
+                with torch.no_grad(): # VAE encoding should not require gradients
+                    # Ensure pixel_values are on the correct device AND dtype
+                    pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=torch.float32) # Cast to float32
+                    latents = vae.encode(pixel_values_device).latent_dist.sample()
+                logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
 
-                # Check for VAE/Transformer channel mismatch and add projection layer if needed
-                vae_latent_channels_actual = vae.config.latent_channels
-                transformer_in_channels_actual = unet.config.in_channels
-                vae_to_transformer_projection = None # Initialize
+                latents = latents * vae.config.scaling_factor
+                latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
-                if vae_latent_channels_actual != transformer_in_channels_actual:
-                    logger.warning(
-                        f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, Transformer input {transformer_in_channels_actual} channels. Adding projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
-                    )
-                    # Use Conv2d to preserve spatial dimensions (H, W) while changing channels (C)
-                    vae_to_transformer_projection = torch.nn.Conv2d(
-                        in_channels=vae_latent_channels_actual,       # e.g., 16
-                        out_channels=transformer_in_channels_actual,  # e.g., 64
-                        kernel_size=1,
-                        bias=False # Typically no bias needed for simple projection
-                    ).to(accelerator.device, dtype=unet.dtype)
-                    # Add projection layer parameters to the optimizer list
-                    params_to_optimize = list(filter(lambda p: p.requires_grad, unet.parameters()))
-                    params_to_optimize.extend(vae_to_transformer_projection.parameters())
-                    logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
-
-                # Apply projection if needed (Conv2d)
+                # Apply projection layer if defined
+                logger.debug(f"Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
                 if vae_to_transformer_projection is not None:
-                    logger.debug(f"Shape BEFORE projection - latents: {latents.shape}")
-                    latents = vae_to_transformer_projection(latents) # Apply Conv2d
-                    logger.debug(f"Shape AFTER projection - latents: {latents.shape}")
+                    b, c, h, w = latents.shape
+                    # Validate the actual channel dimension before projection
+                    if c != vae_latent_channels_actual:
+                        logger.error(f"PANIC: Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
+                        # Handle error appropriately - maybe raise exception
+                        raise ValueError(f"Unexpected latent channel dimension: {c}")
+                        
+                    latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
+                    projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
+                    latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
+                    latents = latents.to(accelerator.device) # Ensure projected latents are on device
+                    logger.debug(f"Projected latents shape: {latents.shape}")
+                    
+                # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
+                bsz, channels, height, width = latents.shape
+                latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
+                logger.info(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
-                # Reshape projected latents for Transformer: (B, C, H, W) -> (B, H*W, C)
-                bsz, c, h, w = latents.shape
-                latents_tok = latents.permute(0, 2, 3, 1).reshape(bsz, h * w, c)
-                logger.debug(f"Shape AFTER projection & reshape (Input to transformer) - latents_tok: {latents_tok.shape}")
+                # Encode text prompts using the two text encoders
+                with torch.no_grad(): # Text encoding should not require gradients
+                    prompt_embeds_outputs = text_encoder(
+                        batch["input_ids"],
+                        output_hidden_states=True,
+                    )
+                    prompt_embeds = prompt_embeds_outputs.last_hidden_state # Use penultimate layer as recommended
+                    clip_pooled = prompt_embeds_outputs.pooler_output # CLIP pooled embeddings
 
-                # --- Noise Sampling (matches projected & reshaped latents) --- 
-                noise = torch.randn_like(latents_tok)
-                logger.debug(f"Shape of noise target: {noise.shape}")
+                    prompt_embeds_2_outputs = text_encoder_2(
+                        batch["input_ids_2"],
+                        output_hidden_states=True,
+                    )
+                    prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state # T5 sequence embeddings
 
-                # --- Timesteps --- 
+                # Sample noise that we'll use as the target
+                noise = torch.randn_like(latents)
+                bsz = latents.shape[0]
+
                 # Sample a random timestep for each image
-                timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (bsz,), device=latents_tok.device)
+                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                 timesteps = timesteps.long()
 
-                # --- Text Encoding --- 
-                with torch.no_grad(): # Still no gradients needed for encoders
-                    # Encode prompts with CLIP
-                    prompt_embeds_outputs = text_encoder[0](batch["input_ids"].to(accelerator.device))[0]
-                    prompt_embeds = prompt_embeds_outputs
-                    # Encode prompts with T5
-                    prompt_embeds_2_outputs = text_encoder[1](batch["input_ids_2"].to(accelerator.device))[0]
-                    prompt_embeds_2 = prompt_embeds_2_outputs
+                # Log shapes before transformer call
+                logger.debug(f"Shape BEFORE transformer call - latents: {latents.shape}")
+                logger.info(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
+                logger.info(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
+                logger.info(f"Shape BEFORE transformer call - clip_pooled (CLIP): {clip_pooled.shape}")
 
-                # Predict the noise residual
-                model_pred = unet(
-                    hidden_states=latents_tok.to(accelerator.device), # Pass projected & reshaped latents
+                # Predict the noise residual using the transformer model
+                model_pred = transformer(
+                    hidden_states=latents_reshaped.to(accelerator.device), # Pass reshaped latents
                     timestep=timesteps.to(accelerator.device), # Explicitly move timesteps
                     encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
-                    pooled_projections=None, # CLIP pooled embeddings
-                    input_ids=batch["input_ids_2"].to(accelerator.device) # T5 token IDs
+                    pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                 ).sample
 
-                # Calculate the loss
-                target = noise # Target is the noise sampled with the same shape as latents_tok
+                # Assume prediction target is the noise (epsilon prediction)
+                target = noise
                 loss = F.mse_loss(model_pred.float(), target.float(), reduction="mean")
 
                 # Gather the losses across all processes for logging (if we use distributed training).
@@ -488,9 +600,16 @@ def main(args):
                     if accelerator.is_main_process:
                         save_path = os.path.join(args.output_dir, f"checkpoint-{global_step}")
                         accelerator.save_state(save_path)
-                        # Save LoRA layers specifically
-                        unet_lora_state_dict = get_peft_model_state_dict(accelerator.unwrap_model(unet))
-                        LoraLoaderMixin.save_lora_weights(save_path, unet_lora_state_dict=unet_lora_state_dict)
+                        # Save LoRA weights specifically if using PEFT library
+                        unwrapped_transformer = accelerator.unwrap_model(transformer)
+                        if isinstance(unwrapped_transformer, PeftModel):
+                            # Use the save_pretrained method from the PeftModel instance
+                            unwrapped_transformer.save_pretrained(save_path)
+                        else:
+                            # Fallback if not a PeftModel (shouldn't happen with LoRA but good practice)
+                            logger.warning("Attempting to save LoRA checkpoint, but model is not a PeftModel.")
+                            # Optionally save the full state dict if needed
+                            # torch.save(unwrapped_transformer.state_dict(), os.path.join(save_path, "pytorch_model.bin"))
                         logger.info(f"Saved state and LoRA weights to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
@@ -508,63 +627,66 @@ def main(args):
         avg_val_loss = 0.0
         if val_dataloader:
             logger.info(f"Running validation for epoch {epoch}...")
-            unet.eval() # Set model to evaluation mode
+            transformer.eval() # Use transformer
             val_loss = 0.0
             val_steps = 0
-            with torch.no_grad(): # Disable gradient calculations for validation
-                for val_step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
-                    # --- Validation Step Logic (mirrors training step for loss calculation) --- 
-                    # Convert images to latent space
-                    if is_compiled_module(vae):
-                        latents = vae.encode(val_batch["pixel_values"].to(accelerator.device, dtype=vae.dtype)).latent_dist.sample()
-                    else:
-                        latents = vae.encode(val_batch["pixel_values"].to(accelerator.device, dtype=vae.dtype)).latent_dist.sample()
+            for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
+                with torch.no_grad():
+                    # Prepare inputs for validation (similar to training)
+                    # Ensure pixel_values are on the correct device and dtype
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=torch.float32) # Cast to float32
+                    latents = vae.encode(pixel_values_device).latent_dist.sample()
+                    logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
+
                     latents = latents * vae.config.scaling_factor
+                    latents = latents.to(accelerator.device) # Ensure latents are on the correct device
 
-                    # Apply projection if needed (Conv2d)
+                    # Apply projection layer if defined
+                    logger.debug(f"Validation: Shape before projection: {latents.shape}, Target input channels: {transformer_in_channels_actual}")
                     if vae_to_transformer_projection is not None:
-                        logger.debug(f"Shape BEFORE validation projection - latents: {latents.shape}")
-                        latents = vae_to_transformer_projection(latents) # Apply Conv2d
-                        logger.debug(f"Shape AFTER validation projection - latents: {latents.shape}")
-                    else:
-                        pass # Should already have correct channel dim
+                        b, c, h, w = latents.shape
+                        if c != vae_latent_channels_actual:
+                            logger.error(f"PANIC: Validation Latent channels {c} != expected {vae_latent_channels_actual} before projection!")
+                            raise ValueError(f"Unexpected validation latent channel dimension: {c}")
+                            
+                        latents_reshaped = latents.permute(0, 2, 3, 1).reshape(b * h * w, c) # Reshape for Linear layer (B*H*W, C_in=16)
+                        projected_latents_reshaped = vae_to_transformer_projection(latents_reshaped) # Apply projection 16->64
+                        latents = projected_latents_reshaped.reshape(b, h, w, transformer_in_channels_actual).permute(0, 3, 1, 2) # Reshape back (B, C_out=64, H, W)
+                        latents = latents.to(accelerator.device) # Ensure projected latents are on device
+                        logger.debug(f"Validation: Projected latents shape: {latents.shape}")
+                        
+                    # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
+                    bsz_val, channels_val, height_val, width_val = latents.shape
+                    latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
+                    logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
-                    # Reshape projected latents for Transformer: (B, C, H, W) -> (B, H*W, C)
-                    bsz, c, h, w = latents.shape
-                    latents_tok_val = latents.permute(0, 2, 3, 1).reshape(bsz, h * w, c)
-                    logger.debug(f"Shape AFTER validation projection & reshape - latents_tok_val: {latents_tok_val.shape}")
+                    # Encode prompts for validation batch
+                    with torch.no_grad():
+                        # CLIP Embeddings
+                        prompt_embeds_outputs = text_encoder(val_batch["input_ids"].to(accelerator.device), output_hidden_states=True)
+                        prompt_embeds = prompt_embeds_outputs.last_hidden_state
+                        clip_pooled = prompt_embeds_outputs.pooler_output
 
-                    # --- Noise Sampling (Validation - matches reshaped latents) --- 
-                    noise = torch.randn_like(latents_tok_val)
-                    logger.debug(f"Shape of validation noise target: {noise.shape}")
+                        # T5 Embeddings
+                        prompt_embeds_2_outputs = text_encoder_2(val_batch["input_ids_2"].to(accelerator.device), output_hidden_states=True)
+                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
 
-                    # --- Timesteps (Validation) --- 
-                    timesteps = torch.randint(0, scheduler.config.num_train_timesteps, (bsz,), device=latents_tok_val.device)
+                    # Sample noise and timesteps for validation
+                    noise = torch.randn_like(latents)
+                    bsz = latents.shape[0]
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                     timesteps = timesteps.long()
 
-                    # --- Text Encoding (Validation) --- 
-                    prompt_embeds_outputs = text_encoder[0](val_batch["input_ids"].to(accelerator.device))[0]
-                    prompt_embeds = prompt_embeds_outputs
-                    prompt_embeds_2_outputs = text_encoder[1](val_batch["input_ids_2"].to(accelerator.device))[0]
-                    prompt_embeds_2 = prompt_embeds_2_outputs
-
-                    # --- Transformer Prediction (Validation) --- 
-                    logger.debug(f"Shape BEFORE validation transformer call - timesteps: {timesteps.shape}")
-                    logger.debug(f"Shape BEFORE validation transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
-                    logger.debug(f"Shape BEFORE validation transformer call - input_ids_2 (T5 tokens): {val_batch['input_ids_2'].shape}")
-
-                    model_pred_val = unet(
-                        hidden_states=latents_tok_val.to(accelerator.device), # Projected & reshaped
+                    # Predict noise using the model
+                    model_pred_val = transformer(
+                        hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
-                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
-                        pooled_projections=None, # CLIP pooled embeddings
-                        input_ids=val_batch["input_ids_2"].to(accelerator.device) # T5 token IDs
+                        encoder_hidden_states=prompt_embeds_2.to(accelerator.device), # T5 sequence embeddings
+                        pooled_projections=clip_pooled.to(accelerator.device), # CLIP pooled embeddings
                     ).sample
 
-                    logger.debug(f"Shape of validation model_pred_val: {model_pred_val.shape}")
-
-                    # Calculate loss
-                    target = noise # Use noise sampled like reshaped latents
+                    # Assume target is noise for validation loss calculation
+                    target = noise
                     loss = F.mse_loss(model_pred_val.float(), target.float(), reduction="mean")
 
                     val_loss += loss.item()
@@ -582,20 +704,19 @@ def main(args):
                     os.makedirs(best_checkpoint_dir, exist_ok=True)
                     logger.info(f"Saving best model checkpoint to {best_checkpoint_dir} (Val Loss: {best_val_loss:.4f})...")
                     
-                    unwrapped_unet = accelerator.unwrap_model(unet)
-                    # Save using appropriate method (PEFT LoRA or standard HF)
-                    if isinstance(unwrapped_unet, PeftModel):
-                         # Save LoRA weights specifically if using PEFT library
-                         unwrapped_unet.save_pretrained(best_checkpoint_dir)
-                    elif hasattr(unwrapped_unet, 'save_pretrained'):
-                         # Standard Hugging Face save_pretrained for non-PEFT models or if LoRA is merged
-                         unwrapped_unet.save_pretrained(best_checkpoint_dir)
+                    unwrapped_transformer = accelerator.unwrap_model(transformer)
+                    if isinstance(unwrapped_transformer, PeftModel):
+                        # Save using appropriate method (PEFT LoRA or standard HF)
+                        unwrapped_transformer.save_pretrained(best_checkpoint_dir)
+                    elif hasattr(unwrapped_transformer, 'save_pretrained'):
+                        # Standard Hugging Face save_pretrained for non-PEFT models or if LoRA is merged
+                        unwrapped_transformer.save_pretrained(best_checkpoint_dir)
                     else:
-                         # Fallback or add specific logic if using a custom model structure
-                         torch.save(unwrapped_unet.state_dict(), os.path.join(best_checkpoint_dir, "pytorch_model.bin"))
+                        # Fallback or add specific logic if using a custom model structure
+                        torch.save(unwrapped_transformer.state_dict(), os.path.join(best_checkpoint_dir, "pytorch_model.bin"))
                     logger.info(f"New best validation loss: {best_val_loss:.4f}. Saved checkpoint to {best_checkpoint_dir}")
             # Set model back to train mode after validation
-            unet.train()
+            transformer.train()
         # --- End of Validation Phase --- 
 
         # Calculate average training loss and throughput for the epoch
@@ -645,17 +766,16 @@ def main(args):
     # --- Save the Final Model ---
     accelerator.wait_for_everyone()
     if accelerator.is_main_process:
-        unet_final = accelerator.unwrap_model(unet)
-        unet_lora_state_dict = get_peft_model_state_dict(unet_final)
-        LoraLoaderMixin.save_lora_weights(
-            args.output_dir,
-            unet_lora_state_dict=unet_lora_state_dict
-        )
-        logger.info(f"Saved final LoRA weights to {args.output_dir}")
-
-        # Save config file
-        with open(os.path.join(args.output_dir, 'final_config.yaml'), 'w') as f:
-            yaml.dump(vars(args), f)
+        final_model = accelerator.unwrap_model(transformer)
+        if isinstance(final_model, PeftModel):
+            final_model.save_pretrained(args.output_dir)
+        else:
+            logger.warning("Final model is not a PeftModel, attempting standard save_pretrained.")
+            if hasattr(final_model, 'save_pretrained'):
+                 final_model.save_pretrained(args.output_dir)
+            else:
+                 torch.save(final_model.state_dict(), os.path.join(args.output_dir, "pytorch_model.bin"))
+        logger.info(f"Saved final LoRA weights (or full model) to {args.output_dir}")
 
     accelerator.end_training()
     end_time = time.time()
@@ -663,17 +783,12 @@ def main(args):
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Fine-tune a FLUX model")
-    parser.add_argument("--config", type=str, help="Path to the configuration file")
-    args = parser.parse_args()
-    args = parse_args(args.config)
-    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
-    args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
-    args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
-    args.checkpointing_steps = getattr(args, 'checkpointing_steps', 0) # Default disable periodic if using best
-    args.max_train_steps = getattr(args, 'max_train_steps', -1) # Default no max steps
-    args.seed = getattr(args, 'seed', 42)
-    # Add val_split default if not in config
-    args.val_split = getattr(args, 'val_split', 0.1) # Default 10% validation split
+    # Configuration loading and argument parsing are now handled within parse_args
+    args = parse_args()
+    
+    # Defaults were already handled inside parse_args
+    # args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    # args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
+    # args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
 
     main(args)
