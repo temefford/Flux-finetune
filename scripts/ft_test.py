@@ -471,26 +471,19 @@ def main(args):
 
     # Collate function
     def collate_fn(examples):
-        pixel_values = torch.stack([torch.tensor(example["pixel_values"]) for example in examples])
+        # Ensure pixel_values are correctly handled (already are)
+        pixel_values = torch.stack([example["pixel_values"] for example in examples])
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-        input_ids = torch.stack([torch.tensor(example["input_ids"]) for example in examples])
-        attention_mask = torch.stack([torch.tensor(example["attention_mask"]) for example in examples])
+        # Ensure input_ids_2 are correctly handled
+        # The preprocess_train function returns tensors for input_ids_2
+        # so we don't need torch.tensor() here.
+        input_ids_2 = torch.stack([example["input_ids_2"] for example in examples])
 
-        batch = {
+        return {
             "pixel_values": pixel_values,
-            "input_ids": input_ids,
-            "attention_mask": attention_mask,
+            "input_ids_2": input_ids_2, # Only include the keys produced by preprocess_train
         }
-
-        # Add text_encoder_2 inputs if they exist in the batch
-        if 'input_ids_2' in examples[0]:
-            input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples])
-            attention_mask_2 = torch.stack([torch.tensor(example["attention_mask_2"]) for example in examples])
-            batch["input_ids_2"] = input_ids_2
-            batch["attention_mask_2"] = attention_mask_2
-
-        return batch
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -593,25 +586,46 @@ def main(args):
                 logger.debug("Image-only batch detected. Using None for text inputs.")
             else:
                 # Multimodal: Get text inputs from batch and encode
-                input_ids_batch = batch["input_ids"].to(accelerator.device) if "input_ids" in batch and batch["input_ids"] is not None else None
                 input_ids_2_batch = batch["input_ids_2"].to(accelerator.device) if "input_ids_2" in batch and batch["input_ids_2"] is not None else None
 
-                if input_ids_batch is not None and input_ids_2_batch is not None:
-                    input_ids = input_ids_batch # Assign to outer scope var
-                    input_ids_2 = input_ids_2_batch # Assign to outer scope var
-                    with torch.no_grad(): # Text encoding should not require gradients
-                        prompt_embeds_outputs = text_encoder(input_ids, output_hidden_states=True)
-                        clip_pooled = prompt_embeds_outputs.pooler_output
-                        prompt_embeds_2_outputs = text_encoder_2(input_ids_2, output_hidden_states=True)
-                        prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
-                    logger.debug("Encoded text inputs for multimodal batch.")
+                if input_ids_2_batch is not None:
+                    logger.debug("Processing batch with T5 text inputs (input_ids_2).")
+                    # Encode captions using T5 encoder (encoder_2)
+                    prompt_embeds_2 = pipeline.text_encoder_2(input_ids_2_batch)[0]
+                    # pooled_prompt_embeds is not directly used by FLUX transformer, skip generating it unless needed elsewhere
                 else:
-                     logger.warning("Missing text inputs for non-imagefolder dataset batch! Using placeholders.")
-                     # Handle error or create placeholders if appropriate
-                     clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
-                     clip_pooled = torch.zeros(batch_size, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
-                     logger.debug(f"Created placeholder clip_pooled: {clip_pooled.shape}")
-                     # Keep text IDs/embeds as None
+                    # This case should ideally not happen if all examples have captions and were tokenized
+                    logger.warning("Batch found with missing 'input_ids_2'. Handling as image-only.")
+                    prompt_embeds = None # Set to None if input_ids was removed
+                    prompt_embeds_2 = None
+                    pooled_projections = None
+                    txt_ids = None # Set to None if input_ids was removed
+
+                # Placeholder handling (Memory: 361714d3) - This logic needs review based on removing input_ids
+                if prompt_embeds_2 is None:
+                    # Need to know the expected cross_attention_dim for FLUX
+                    cross_attn_dim = transformer.config.cross_attention_dim # Check this attribute exists
+                    batch_size = pixel_values.shape[0]
+                    prompt_embeds_2 = torch.zeros(
+                        (batch_size, 1, cross_attn_dim),
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    logger.warning(f"Created null T5 embeds: {prompt_embeds_2.shape}")
+
+                # Ensure input_ids_2 is None for image-only batches before the call
+                if input_ids_2_batch is None:
+                    # This confirmation might seem redundant if it comes in as None, 
+                    # but ensures it's explicitly None before passing.
+                    input_ids_2 = None 
+                    logger.warning("Confirmed input_ids_2 is None for image-only batch.")
+
+                # Create null T5 input IDs if still None
+                if input_ids_2 is None:
+                    input_ids_2 = torch.zeros(
+                        (batch_size, 1),
+                        dtype=torch.long, device=accelerator.device
+                    )
+                    logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
             # --- Handle Missing Conditioning Inputs (Create Placeholders) --- #
             # Get expected embedding dimensions and null sequence length
@@ -647,26 +661,11 @@ def main(args):
                 else:
                     clip_pooled = clip_pooled.to(dtype=weight_dtype)
 
-                # Create null T5 input IDs if still None
-                if input_ids_2 is None:
-                    t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') and tokenizer_2.pad_token_id is not None else 0
-                    input_ids_2 = torch.full(
-                        (batch_size, null_sequence_length),
-                        fill_value=t5_pad_token_id,
-                        dtype=torch.long, device=accelerator.device
-                    )
-                    logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
-                else:
-                    input_ids_2 = input_ids_2.long()
-            # For imagefolder dataset, we intentionally leave prompt_embeds_2 and input_ids_2 as None so that
-            # later logic can create placeholders matching the image token sequence length (seq_len).
-             # --- End Unconditional Handling --- #
-
             # --- VAE Encoding and Noise Addition (Common Logic) ---
             with accelerator.accumulate(transformer): # Use transformer here
                 # Encode pixel values -> latents using VAE
                 # VAE is prepared by accelerator, handles device/dtype internally via hooks/casting
-                latents = vae.encode(pixel_values).latent_dist.sample()
+                latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
 
                 latents = latents * vae.config.scaling_factor
@@ -718,16 +717,6 @@ def main(args):
                     prompt_embeds_2 = torch.zeros(bsz, 1, cross_attention_dim, dtype=weight_dtype, device=accelerator.device)
                     logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2.shape}")
 
-                # Store original input_ids_2 state for conditional logic
-                original_input_ids_2_is_none = input_ids_2 is None
-
-                # Ensure input_ids_2 is None for image-only batches before the call
-                if input_ids_2 is None:
-                    # This confirmation might seem redundant if it comes in as None, 
-                    # but ensures it's explicitly None before passing.
-                    input_ids_2 = None 
-                    logger.warning("Confirmed input_ids_2 is None for image-only batch.")
-
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (placeholders or None)
                 logger.debug(f"  transformer input shape - hidden_states: {latents_reshaped.shape}")
@@ -742,7 +731,7 @@ def main(args):
                      logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
 
                 # Revert to creating a minimal placeholder for input_ids_2
-                if original_input_ids_2_is_none:
+                if input_ids_2 is None:
                      input_ids_2 = torch.zeros(bsz, 1, dtype=torch.long, device=accelerator.device)
                      logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
