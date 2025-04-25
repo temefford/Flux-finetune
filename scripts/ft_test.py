@@ -105,52 +105,28 @@ def parse_args():
     return args
 
 # --- Data Preprocessing Helper Functions ---
-def tokenize_captions(tokenizer, examples, text_column="text"):
-    """Tokenizes captions from the specified text column using both CLIP and T5 tokenizers.
+def tokenize_captions(captions, tokenizer):
+    """Tokenizes captions using the provided tokenizer."""
+    try:
+        # FLUX uses a single T5 tokenizer for the second text input (input_ids_2)
+        # Remove the assumption of unpacking two tokenizers
+        # clip_tokenizer, t5_tokenizer = tokenizer # <-- REMOVE THIS LINE
 
-    Args:
-        tokenizer: The tokenizer instance (should be a tuple of CLIP and T5 tokenizers for FLUX).
-        examples: A dictionary-like object containing the data batch.
-        text_column (str): The name of the column containing the text captions.
+        # Directly use the passed tokenizer (which should be tokenizer_2 from the pipeline)
+        inputs = tokenizer(
+            captions,
+            max_length=tokenizer.model_max_length, # Use the tokenizer's max length
+            padding="max_length", # Pad to max length
+            truncation=True,
+            return_tensors="pt",
+        )
+        return inputs.input_ids # Return only the input_ids
+    except Exception as e:
+        logger.error(f"Error during caption tokenization: {e}")
+        # Depending on desired behavior, either return None/empty tensor or raise
+        raise e # Re-raise for now
 
-    Returns:
-        A dictionary containing tokenized 'input_ids', 'attention_mask', etc.
-    """
-    clip_tokenizer, t5_tokenizer = tokenizer
-
-    captions = []
-    for caption in examples[text_column]: # Use text_column argument
-        if isinstance(caption, str):
-            captions.append(caption)
-        elif isinstance(caption, (list, tuple)):
-            # Handle lists/tuples if necessary, for now just take the first element
-            # Or adapt logic based on expected format (e.g., random.choice for training)
-            captions.append(caption[0] if caption else "") # Fallback for empty list/tuple
-        else:
-            captions.append(str(caption)) # Convert other types to string
-
-    # Tokenize with CLIP tokenizer
-    text_inputs = clip_tokenizer(
-        captions, max_length=clip_tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-    )
-    input_ids = text_inputs.input_ids
-    attention_mask = text_inputs.attention_mask
-
-    # Tokenize with T5 tokenizer
-    text_inputs_2 = t5_tokenizer(
-        captions, max_length=t5_tokenizer.model_max_length, padding="max_length", truncation=True, return_tensors="pt"
-    )
-    input_ids_2 = text_inputs_2.input_ids
-    attention_mask_2 = text_inputs_2.attention_mask
-
-    return {
-        "input_ids": input_ids,
-        "attention_mask": attention_mask,
-        "input_ids_2": input_ids_2,
-        "attention_mask_2": attention_mask_2,
-    }
-
-def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, tokenizer_2):
+def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, caption_column, tokenizer_2):
     """Preprocesses a batch of training examples."""
     try:
         # Append .jpg to the hash value retrieved using image_column
@@ -158,12 +134,12 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
         examples["pixel_values"] = [image_transforms(image) for image in images]
         
-        # Tokenize hash column using tokenizer_2
-        hashes = list(examples[hash_column])
-        # Ensure hashes are strings
-        hashes = [str(h) for h in hashes] 
-        logger.debug(f"Tokenizing hashes (first 5): {hashes[:5]}")
-        text_inputs_2 = tokenize_captions(hashes, tokenizer_2) # Use tokenizer_2
+        # Tokenize caption column using tokenizer_2
+        captions = list(examples[caption_column]) # Use caption_column
+        # Ensure captions are strings
+        captions = [str(c) if c is not None else "" for c in captions] # Handle potential None captions
+        logger.debug(f"Tokenizing captions (first 5): {captions[:5]}")
+        text_inputs_2 = tokenize_captions(captions, tokenizer_2) # Pass captions, use tokenizer_2
         examples["input_ids_2"] = text_inputs_2
     except FileNotFoundError as e:
         logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
@@ -462,7 +438,8 @@ def main(args):
         "tokenizer_2": tokenizer_2,
         "dataset_abs_path": dataset_abs_path,        # Added back
         "image_column": args.image_column,           # Added back
-        "hash_column": args.image_column            # Added back (using image_column value based on config)
+        "hash_column": args.image_column,            # Added back (using image_column value based on config)
+        "caption_column": args.caption_column         # Added back
     }
     train_dataset = train_dataset.map(
         preprocess_train,
@@ -481,7 +458,8 @@ def main(args):
             "tokenizer_2": tokenizer_2,
             "dataset_abs_path": dataset_abs_path_val,   # Added back
             "image_column": args.image_column,          # Added back
-            "hash_column": args.image_column           # Added back (using image_column value based on config)
+            "hash_column": args.image_column,           # Added back (using image_column value based on config)
+            "caption_column": args.caption_column        # Added back
         }
         val_dataset = val_dataset.map(
             preprocess_train, # Use the same function
