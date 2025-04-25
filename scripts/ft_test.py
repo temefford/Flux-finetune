@@ -680,7 +680,7 @@ def main(args):
                 batch_input_ids_2 = batch.get("input_ids_2", None)
 
                 # Get expected embedding dimensions
-                t5_embed_dim = transformer.config.cross_attention_dim # e.g., 4096
+                t5_embed_dim = getattr(transformer.config, 'cross_attention_dim', transformer.config.joint_attention_dim) # e.g., 4096
                 clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
                 null_sequence_length = 1 # Define a minimal length for null sequences
 
