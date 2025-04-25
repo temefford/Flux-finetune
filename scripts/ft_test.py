@@ -55,6 +55,12 @@ def parse_args():
     parser.add_argument("--text_ids_json_path", type=str, default=None, help="Optional path to a JSON file mapping image hashes to text_ids.")
     parser.add_argument("--text_ids_column", type=str, default=None, help="Column name for text_ids if using --text_ids_json_path.")
 
+    parser.add_argument("--report_to", type=str, default="tensorboard", help='The integration to report the results and logs to. Supported platforms are `"tensorboard"`, `"wandb"`, `"comet_ml"`. Use `"all"` to report to all integrations.')
+    parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"], help="Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >= 1.10. Set 'no' for standard 32-bit float training.")
+    parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
+    parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
+    parser.add_argument("--output_dir", type=str, default="flux-finetuned", help="The output directory where the model predictions and checkpoints will be written.")
+
     cmd_args = parser.parse_args() # Parse command line args first
 
     # --- Load Configuration from YAML if specified --- #
@@ -1098,7 +1104,7 @@ def main(args):
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents_reshaped)
                     bsz = pixel_values_device.shape[0]
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
+                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents_reshaped.device)
                     timesteps = timesteps.long()
 
                     # Ensure pooled projections exist (create placeholder if needed) -- Moved here AGAIN to prevent logging error
