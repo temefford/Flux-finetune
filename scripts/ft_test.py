@@ -692,6 +692,13 @@ def main(args):
                 if batch_input_ids_2 is not None:
                     batch_input_ids_2 = batch_input_ids_2.long() # Ensure Long type for IDs
 
+                clip_embed_dim = text_encoder.config.projection_dim # Required for placeholder
+                if batch_clip_pooled is None:
+                    batch_clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug(f"Created null pooled_prompt_embeds with shape: {batch_clip_pooled.shape}")
+                else:
+                    batch_clip_pooled = batch_clip_pooled.to(dtype=weight_dtype)
+
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
                 model_pred = transformer(
