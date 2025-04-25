@@ -22,6 +22,8 @@ from PIL import Image
 from tqdm.auto import tqdm
 
 import numpy as np # Import numpy for type checking
+import logging
+import traceback
 
 logger = get_logger(__name__)
 
@@ -135,6 +137,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         for i, path in enumerate(image_paths):
             try:
                 img = Image.open(path).convert("RGB")
+                logger.debug(f"Loaded image {os.path.basename(path)}: Mode={img.mode}, Size={img.size}, Format={img.format}")
                 images[i] = img
                 valid_indices.append(i)
             except IndexError as ie:
@@ -177,19 +180,41 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
                 img_path = image_paths[img_idx]
                 try:
                     individual_input = image_transforms([img_to_process]) # Process as a batch of 1
-                    pv_individual_maybe_numpy = individual_input['pixel_values']
-                    if isinstance(pv_individual_maybe_numpy, np.ndarray):
-                        processed_individual_tensors[img_idx] = torch.from_numpy(pv_individual_maybe_numpy).squeeze(0) # Remove batch dim
-                    elif isinstance(pv_individual_maybe_numpy, torch.Tensor):
-                        processed_individual_tensors[img_idx] = pv_individual_maybe_numpy.squeeze(0) # Remove batch dim
+                    logger.debug(f"Fallback - image_transforms output: type={type(individual_input)}, value={individual_input}")
+                    logger.debug(f"Fallback Processing Image {os.path.basename(img_path)}: Mode={img_to_process.mode}, Size={img_to_process.size}, Format={img_to_process.format}")
+
+                    # Handle direct tensor output or dictionary output
+                    pv_individual = None
+                    if isinstance(individual_input, torch.Tensor):
+                        # If image_transforms returns a tensor directly
+                        pv_individual = individual_input.squeeze(0) # Assume it might still have a batch dim of 1
+                        logger.debug(f"Fallback - Handled direct tensor output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
+                    elif isinstance(individual_input, dict) and 'pixel_values' in individual_input:
+                        # If image_transforms returns a dict (original expectation)
+                        pv_maybe_numpy_or_tensor = individual_input['pixel_values']
+                        if isinstance(pv_maybe_numpy_or_tensor, np.ndarray):
+                            pv_individual = torch.from_numpy(pv_maybe_numpy_or_tensor).squeeze(0) # Remove batch dim
+                        elif isinstance(pv_maybe_numpy_or_tensor, torch.Tensor):
+                             pv_individual = pv_maybe_numpy_or_tensor.squeeze(0) # Remove batch dim
+                        else:
+                            logger.warning(f"Fallback - Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)}")
+                        if pv_individual is not None:
+                             logger.debug(f"Fallback - Handled dict output. Shape: {pv_individual.shape}, Dtype: {pv_individual.dtype}")
                     else:
-                        raise TypeError(f"Unexpected type from individual image processor: {type(pv_individual_maybe_numpy)}")
-                except IndexError as individual_ie:
-                    logger.error(f"--> Culprit Found <-- IndexError processing individual image: {img_path}. Error: {individual_ie}. Skipping this image.")
-                    # Ensure this index gets None later
-                except Exception as individual_e:
-                    logger.error(f"Error processing individual image {img_path}: {individual_e}. Skipping this image.")
-                    # Ensure this index gets None later
+                        logger.error(f"Fallback - Unexpected output type from image_transforms: {type(individual_input)}")
+
+                    if pv_individual is not None:
+                        processed_individual_tensors[img_idx] = pv_individual
+                        logger.debug(f"Successfully processed fallback image {os.path.basename(img_path)}")
+                    else:
+                         logger.warning(f"Fallback - Failed to extract tensor for image {os.path.basename(img_path)}")
+
+
+                except Exception as individual_e: # Catch specific errors if needed
+                    # Use traceback for more detailed error logging in fallback
+                    tb_str = traceback.format_exc()
+                    logger.error(f"--> Error <-- Fallback processing failed for image {img_path}. Error: {individual_e}\nTraceback:\n{tb_str}. Skipping.")
+                    # processed_individual_tensors[img_idx] remains None
 
             # Reconstruct the batch tensor from successfully processed individual images
             valid_tensors_list = [processed_individual_tensors.get(idx) for idx in valid_indices if processed_individual_tensors.get(idx) is not None]
@@ -283,6 +308,13 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
 
 # --- Main Function ---
 def main(args):
+    # === Configure Logging ===
+    # Set level to DEBUG to capture image property logs
+    log_level = logging.DEBUG
+    log_format = "%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+    logging.basicConfig(level=log_level, format=log_format)
+    # ========================
+
     # Initialize Accelerator
     logging_dir = Path(args.output_dir, "logs")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
@@ -294,10 +326,14 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
+    # === Log Logging Level (After Accelerator Init) ===
+    logger.info(f"Logging level set to {logging.getLevelName(log_level)}")
+    # ===================================================
+
     accelerator.print(f"DEBUG: Effective args.data_dir after parsing: {args.data_dir}")
 
     # Make one log on every process with the configuration for debugging.
-    accelerator.print(f"Accelerator state: {accelerator.state}")
+    # logger.info(accelerator.state, main_process_only=False)
 
     if args.seed is not None:
         set_seed(args.seed)
@@ -585,7 +621,18 @@ def main(args):
             # Return an empty dictionary or None to signal skipping this batch in the training loop
             return None
 
-        # Stack only the valid tensors
+        # Log details of valid examples before stacking
+        logger.debug(f"Collate - Processing {len(valid_examples)} valid examples out of {len(examples)} original.")
+        for i, example in enumerate(valid_examples):
+            pv = example.get("pixel_values")
+            ids2 = example.get("input_ids_2")
+            pv_type = type(pv).__name__
+            ids2_type = type(ids2).__name__
+            # Use getattr to safely get shape, defaulting to 'N/A' if not a tensor
+            pv_shape = getattr(pv, 'shape', 'N/A')
+            ids2_shape = getattr(ids2, 'shape', 'N/A')
+            logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
+
         try:
             pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
