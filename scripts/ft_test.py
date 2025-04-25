@@ -640,7 +640,7 @@ def main(args):
                     hidden_states=latents_reshaped.to(accelerator.device),
                     timestep=timesteps.to(accelerator.device),
                     encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
-                    pooled_projections=clip_pooled.to(accelerator.device),
+                    txt_pooled=clip_pooled.to(accelerator.device),
                     txt_ids=input_ids_2.to(accelerator.device),
                 ).sample
 
@@ -763,7 +763,7 @@ def main(args):
                         hidden_states=latents_reshaped_val.to(accelerator.device),
                         timestep=timesteps.to(accelerator.device),
                         encoder_hidden_states=prompt_embeds_2.to(accelerator.device),
-                        pooled_projections=clip_pooled.to(accelerator.device),
+                        txt_pooled=clip_pooled.to(accelerator.device),
                         txt_ids=val_batch["input_ids_2"].to(accelerator.device),
                     ).sample
 
