@@ -246,7 +246,13 @@ def preprocess_func(examples, **fn_kwargs):
 
 # --- Main Function ---
 def main(args):
-    logger.debug(f"Effective args.data_dir after parsing: {args.data_dir}")
+    # Configure logging
+    log_level = getattr(logging, args.log_level.upper(), logging.INFO)
+    # Basic config first, Accelerator might reconfigure
+    logging.basicConfig(level=log_level, format='%(asctime)s - %(levelname)s - %(name)s - %(message)s') 
+    logger = logging.getLogger(__name__)
+
+    # Initialize Accelerator
     logging_dir = Path(args.output_dir, "logs")
     accelerator_project_config = ProjectConfiguration(project_dir=args.output_dir, logging_dir=logging_dir)
 
@@ -257,29 +263,9 @@ def main(args):
         project_config=accelerator_project_config,
     )
 
-    # Log overrides now that accelerator is initialized
-    if hasattr(args, 'config_path'): # Check if config was successfully loaded
-        if args.config_path != 'configs/ft_config.yaml': # Log if not default
-             logger.info(f"Using configuration file: {args.config_path}", main_process_only=True)
-        # Check if paths were overridden (by comparing with originally loaded values if we stored them, or just checking if cmd_args existed - easier)
-        # Simplest: Check if the override args were passed (we need to get cmd_args again or pass them)
-        # Let's re-parse minimal args just for checking overrides
-        parser = argparse.ArgumentParser(add_help=False) # Don't add help again
-        parser.add_argument("--data_dir", type=str, default=None)
-        parser.add_argument("--output_dir", type=str, default=None)
-        cmd_override_args, _ = parser.parse_known_args() # Parse only known args
-
-        if cmd_override_args.data_dir:
-            logger.info(f"Overriding dataset_path with command-line value: {args.dataset_path}", main_process_only=True)
-        if cmd_override_args.output_dir:
-             logger.info(f"Overriding output_dir with command-line value: {args.output_dir}", main_process_only=True)
+    logger.debug(f"Effective args.data_dir after parsing: {args.data_dir}")
 
     # Make one log on every process with the configuration for debugging.
-    logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
-        datefmt="%m/%d/%Y %H:%M:%S",
-        level=logging.INFO,
-    )
     logger.info(accelerator.state, main_process_only=False)
     if accelerator.is_local_main_process:
         datasets.utils.logging.set_verbosity_warning()
