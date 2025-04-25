@@ -120,7 +120,11 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     # Determine image paths and handle potential hash column presence
     # Image files are expected directly in dataset_abs_path, alongside metadata
     # Build a *correct* image root once and reuse it
-    image_root = dataset_abs_path  # <-- ADAPT if your folder is different
+     # <-- ADAPT if your folder is different
+    # 1️⃣  make sure hash_column is usable
+    if not hash_column:
+        hash_column = image_column        # <- use image_column as backup
+    image_root = dataset_abs_path
     if hash_column and hash_column in examples:
         image_paths = [os.path.join(image_root, f"{fn}.jpg") for fn in examples[hash_column]]
         logger.info(f"[preprocess_train] Example image paths: {image_paths[:5]}")
