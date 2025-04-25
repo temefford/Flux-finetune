@@ -56,37 +56,51 @@ def parse_args():
 
     cmd_args = parser.parse_args() # Parse command line args first
 
-    # --- Load Configuration from YAML --- #
-    try:
-        with open(cmd_args.config, 'r') as f:
-            config = yaml.safe_load(f)
-    except FileNotFoundError:
-        print(f"ERROR: Configuration file not found at: {cmd_args.config}") # Use print
-        raise
-    except Exception as e:
-        print(f"ERROR: Error loading configuration file {cmd_args.config}: {e}") # Use print
-        raise
+    # --- Load Configuration from YAML if specified --- #
+    config_args = {} # Dictionary to hold args from config file
+    if cmd_args.config:
+        try:
+            with open(cmd_args.config, 'r') as f:
+                config = yaml.safe_load(f)
+                if config: # Ensure config is not empty
+                    config_args = config
+        except FileNotFoundError:
+            print(f"ERROR: Configuration file not found at: {cmd_args.config}")
+            raise
+        except Exception as e:
+            print(f"ERROR: Error loading configuration file {cmd_args.config}: {e}")
+            raise
 
-    # Create Namespace from YAML config first
-    args = argparse.Namespace(**config)
-    # Store the path to the config file itself if needed later
-    args.config_path = cmd_args.config 
+    # --- Merge Arguments: Priority: Command Line > Config File > Parser Defaults --- #
 
-    # Convert cmd_args Namespace to dict for easier iteration
-    cmd_args_dict = vars(cmd_args)
+    # 1. Get parser defaults
+    parser_defaults = parser.parse_args([])
+    final_args = argparse.Namespace(**vars(parser_defaults)) # Start with defaults
 
-    # Override config values with any non-default command-line arguments
-    for key, value in cmd_args_dict.items():
-        # Skip the config file path itself
-        if key == 'config':
-            continue
+    # 2. Update with config file arguments
+    for k, v in config_args.items():
+        if hasattr(final_args, k): # Only update if it's a known argument
+            setattr(final_args, k, v)
+        else:
+            logger.warning(f"Ignoring unknown argument '{k}' from config file '{cmd_args.config}'")
 
-        # Check if the cmd arg value is different from the parser's default
-        # This handles None for paths, specific values, and boolean flags
-        default_value = parser.get_default(key)
-        if value != default_value:
-            print(f"INFO: Overriding '{key}' with command-line value: {value}") # Use print
-            setattr(args, key, value)
+    # 3. Update with command line arguments (highest priority)
+    # Iterate through args defined in the parser to only consider known args
+    for k in vars(parser_defaults):
+        cmd_val = getattr(cmd_args, k, None)
+        # Check if the command line value is different from the parser's default
+        # This handles boolean flags correctly (e.g., --debug without being in config)
+        # and ensures cmd line explicitly set values (even if None) override config/defaults
+        if cmd_val != getattr(parser_defaults, k):
+            setattr(final_args, k, cmd_val)
+
+    # Store the config path if one was used
+    final_args.config_path = cmd_args.config
+
+    args = final_args # Assign the final merged args
+
+    # Add any derived arguments or defaults needed after merging
+    args.train_batch_size = getattr(args, 'train_batch_size', 4)
 
     # --- Post-merge adjustments specific to certain args ---
     # Use data_dir as dataset_path if dataset_path wasn't set by config or cmd line override
