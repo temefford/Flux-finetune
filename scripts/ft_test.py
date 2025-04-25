@@ -148,6 +148,70 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column)
         raise e
     return examples
 
+# --- Preprocessing Function --- #
+def preprocess_func(examples, **fn_kwargs):
+    # Extract necessary variables passed via fn_kwargs
+    image_transforms = fn_kwargs.get("image_transforms")
+    tokenizer = fn_kwargs.get("tokenizer")
+    tokenizer_2 = fn_kwargs.get("tokenizer_2")
+    args = fn_kwargs.get("args")
+
+    if not all([image_transforms, tokenizer, tokenizer_2, args]):
+        raise ValueError("Missing required kwargs in preprocess_func (image_transforms, tokenizer, tokenizer_2, args)")
+
+    # 1. Load and Transform Images
+    # For 'imagefolder', the 'image' column contains PIL Image objects
+    # For 'hf_metadata', it might contain paths or bytes - adjust loading if needed
+    try:
+        images = [image.convert("RGB") for image in examples[args.image_column]]
+    except Exception as e:
+        logger.error(f"Error accessing/converting image column '{args.image_column}': {e}")
+        logger.error(f"Example keys: {examples.keys()}")
+        # Handle potential issues like incorrect column name or non-image data
+        # For now, let's re-raise or return an empty dict to signal failure
+        raise e # Or handle more gracefully
+
+    pixel_values = torch.stack([image_transforms(image) for image in images])
+    pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
+
+    # 2. Tokenize Captions (Handle 'imagefolder' case)
+    if args.dataset_type == "imagefolder":
+        # Generate dummy captions (empty strings) for imagefolder
+        num_examples = len(images) # Use length of successfully loaded images
+        dummy_captions_list = ["" for _ in range(num_examples)]
+        # Create a temporary dict mimicking the structure expected by tokenize_captions
+        # Use the caption_column name specified in args for the key
+        caption_examples = {args.caption_column: dummy_captions_list}
+        captions = tokenize_captions((tokenizer, tokenizer_2), caption_examples, text_column=args.caption_column)
+    elif args.dataset_type == "hf_metadata": # Assuming hf_metadata has the caption column
+        # Check if caption column exists before accessing
+        if args.caption_column not in examples:
+            logger.error(f"Caption column '{args.caption_column}' not found in 'hf_metadata' dataset example.")
+            logger.error(f"Available columns: {list(examples.keys())}")
+            # Decide how to handle: raise error, skip example, use empty caption?
+            raise KeyError(f"Caption column '{args.caption_column}' missing for hf_metadata.")
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+    else:
+        # Should not happen if initial loading logic is correct, but good to handle
+        logger.error(f"Preprocessing encountered unexpected dataset type: {args.dataset_type}")
+        # Fallback or raise error
+        raise ValueError(f"Unsupported dataset type in preprocess_func: {args.dataset_type}")
+
+    # 3. VAE Encoding (if not done in training loop)
+    # Moved VAE encoding to the training loop for efficiency
+    # latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
+    # latents = latents * vae.config.scaling_factor
+
+    # Return processed data
+    return {
+        "pixel_values": pixel_values,
+        "input_ids": captions["input_ids"],
+        "input_ids_2": captions["input_ids_2"],
+        # Add attention masks if needed by your model/loss function
+        # "attention_mask": captions["attention_mask"],
+        # "attention_mask_2": captions["attention_mask_2"],
+    }
+
 # --- Main Function ---
 def main(args):
     logging_dir = Path(args.output_dir, "logs")
@@ -370,34 +434,30 @@ def main(args):
         ]
     )
 
-    # Define the preprocessing function with necessary arguments captured
-    def preprocess_func(examples):
-        # Tokenize captions using the 'artwork' field
-        # Pass the actual tokenizers, not the text encoders
-        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
-        # Preprocess images using the absolute path
-        processed_images = preprocess_train(examples, dataset_abs_path, image_transforms, args.image_column)
-
-        # Combine results
-        output = {
-            "pixel_values": processed_images["pixel_values"],
-            "input_ids": captions["input_ids"],
-            "attention_mask": captions["attention_mask"],
-        }
-        # Add text_encoder_2 inputs if they exist
-        if 'input_ids_2' in captions:
-             output['input_ids_2'] = captions['input_ids_2']
-             output['attention_mask_2'] = captions['attention_mask_2']
-        return output
-
-    with accelerator.main_process_first():
-        # Apply preprocessing to train dataset
-        logger.info("Preprocessing training data...")
-        train_dataset = train_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=train_dataset.column_names)
-        # Apply preprocessing to val dataset if it exists
-        if val_dataset:
-            logger.info("Preprocessing validation data...")
-            val_dataset = val_dataset.map(preprocess_func, batched=True, num_proc=args.preprocessing_num_workers, remove_columns=val_dataset.column_names)
+    logger.info("Preprocessing training data...")
+    preprocess_kwargs = {
+        "image_transforms": image_transforms,
+        "tokenizer": tokenizer,
+        "tokenizer_2": tokenizer_2,
+        "args": args # Pass the args namespace
+    }
+    train_dataset = train_dataset.map(
+        preprocess_func,
+        batched=True,
+        num_proc=args.preprocessing_num_workers,
+        remove_columns=train_dataset.column_names,
+        fn_kwargs=preprocess_kwargs # Pass variables here
+    )
+    # Apply preprocessing to val dataset if it exists
+    if val_dataset:
+        logger.info("Preprocessing validation data...")
+        val_dataset = val_dataset.map(
+            preprocess_func,
+            batched=True,
+            num_proc=args.preprocessing_num_workers,
+            remove_columns=val_dataset.column_names,
+            fn_kwargs=preprocess_kwargs # Pass variables here too
+        )
 
     # Collate function
     def collate_fn(examples):
