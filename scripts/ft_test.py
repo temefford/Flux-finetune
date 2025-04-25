@@ -648,38 +648,42 @@ def main(args):
             clip_embed_dim = text_encoder.config.projection_dim # e.g., 1280
             null_sequence_length = 1 # Minimal length for null sequences
 
-            # Create null T5 embeddings if needed
-            if prompt_embeds_2 is None:
-                prompt_embeds_2 = torch.zeros(
-                    batch_size, null_sequence_length, t5_embed_dim,
-                    dtype=weight_dtype, device=accelerator.device
-                )
-                logger.debug(f"Created null T5 embeds: {prompt_embeds_2.shape}")
-            else:
-                prompt_embeds_2 = prompt_embeds_2.to(dtype=weight_dtype)
+            # For non-imagefolder datasets, ensure text conditioning placeholders exist
+            if args.dataset_type != "imagefolder":
+                # Create null T5 embeddings if still None
+                if prompt_embeds_2 is None:
+                    prompt_embeds_2 = torch.zeros(
+                        batch_size, null_sequence_length, t5_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    logger.debug(f"Created null T5 embeds: {prompt_embeds_2.shape}")
+                else:
+                    prompt_embeds_2 = prompt_embeds_2.to(dtype=weight_dtype)
 
-            # Create null CLIP pooled projections if needed
-            if clip_pooled is None:
-                clip_pooled = torch.zeros(
-                    batch_size, clip_embed_dim,
-                    dtype=weight_dtype, device=accelerator.device
-                )
-                logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
-            else:
-                clip_pooled = clip_pooled.to(dtype=weight_dtype)
+                # Create null CLIP pooled projections if still None
+                if clip_pooled is None:
+                    clip_pooled = torch.zeros(
+                        batch_size, clip_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
+                else:
+                    clip_pooled = clip_pooled.to(dtype=weight_dtype)
 
-            # Create null T5 input IDs if needed
-            if input_ids_2 is None:
-                t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') and tokenizer_2.pad_token_id is not None else 0
-                input_ids_2 = torch.full(
-                    (batch_size, null_sequence_length),
-                    fill_value=t5_pad_token_id,
-                    dtype=torch.long, device=accelerator.device
-                )
-                logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
-            else:
-                input_ids_2 = input_ids_2.long()
-            # --- End Unconditional Handling --- #
+                # Create null T5 input IDs if still None
+                if input_ids_2 is None:
+                    t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') and tokenizer_2.pad_token_id is not None else 0
+                    input_ids_2 = torch.full(
+                        (batch_size, null_sequence_length),
+                        fill_value=t5_pad_token_id,
+                        dtype=torch.long, device=accelerator.device
+                    )
+                    logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
+                else:
+                    input_ids_2 = input_ids_2.long()
+            # For imagefolder dataset, we intentionally leave prompt_embeds_2 and input_ids_2 as None so that
+            # later logic can create placeholders matching the image token sequence length (seq_len).
+             # --- End Unconditional Handling --- #
 
             # --- VAE Encoding and Noise Addition (Common Logic) ---
             with accelerator.accumulate(transformer): # Use transformer here
