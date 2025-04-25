@@ -567,11 +567,19 @@ def main(args):
 
         for step, batch in enumerate(train_dataloader):
             with accelerator.accumulate(transformer): # Use transformer here
-                # Convert images to latent space
-                with torch.no_grad(): # VAE encoding should not require gradients
-                    # Ensure pixel_values are on the correct device AND dtype
-                    pixel_values_device = batch["pixel_values"].to(device=accelerator.device, dtype=torch.float32) # Cast to float32
-                    latents = vae.encode(pixel_values_device).latent_dist.sample()
+                # Prepare batch for model
+                pixel_values = batch["pixel_values"]
+                input_ids = batch["input_ids"]
+                input_ids_2 = batch["input_ids_2"]
+                attention_mask = batch["attention_mask"]
+                attention_mask_2 = batch["attention_mask_2"]
+
+                # Move pixel values to device and cast to VAE's expected dtype
+                pixel_values_device = pixel_values.to(accelerator.device, dtype=weight_dtype)
+
+                # Encode pixel values -> latents
+                # VAE is already on the correct device and dtype (float16)
+                latents = vae.encode(pixel_values_device).latent_dist.sample()
                 logger.debug(f"Initial VAE latents shape: {latents.shape}") # Log shape immediately after VAE
 
                 latents = latents * vae.config.scaling_factor
@@ -601,14 +609,14 @@ def main(args):
                 # Encode text prompts using the two text encoders
                 with torch.no_grad(): # Text encoding should not require gradients
                     prompt_embeds_outputs = text_encoder(
-                        batch["input_ids"],
+                        input_ids,
                         output_hidden_states=True,
                     )
                     prompt_embeds = prompt_embeds_outputs.last_hidden_state # Use penultimate layer as recommended
                     clip_pooled = prompt_embeds_outputs.pooler_output # CLIP pooled embeddings
 
                     prompt_embeds_2_outputs = text_encoder_2(
-                        batch["input_ids_2"],
+                        input_ids_2,
                         output_hidden_states=True,
                     )
                     prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state # T5 sequence embeddings
@@ -703,7 +711,10 @@ def main(args):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
                     # Ensure pixel_values are on the correct device and dtype
-                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=torch.float32) # Cast to float32
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype) # Cast to weight_dtype
+
+                    # Encode pixel values -> latents
+                    # VAE is already on the correct device and dtype (float16)
                     latents = vae.encode(pixel_values_device).latent_dist.sample()
                     logger.debug(f"Validation: Initial VAE latents shape: {latents.shape}") # Log shape
 
