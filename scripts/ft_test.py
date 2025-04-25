@@ -131,6 +131,23 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     try:
         # Load images
         images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
+
+        # --- Add logging for image_transforms output ---
+        if images:
+            first_image_transformed = image_transforms(images[0])
+            logger.info(f"preprocess_train: Type of transformed first image: {type(first_image_transformed)}")
+            if isinstance(first_image_transformed, torch.Tensor):
+                logger.info(f"  Shape: {first_image_transformed.shape}")
+            elif isinstance(first_image_transformed, (list, tuple)):
+                logger.info(f"  Length: {len(first_image_transformed)}")
+                if first_image_transformed:
+                    logger.info(f"  Type of first element: {type(first_image_transformed[0])}")
+                    if isinstance(first_image_transformed[0], torch.Tensor):
+                        logger.info(f"    Shape: {first_image_transformed[0].shape}")
+            else:
+                logger.info(f"  Value: {first_image_transformed}")
+        # --- End logging ---
+
         # Apply transforms - result is a list of tensors
         pixel_values_list = [image_transforms(image) for image in images]
 
