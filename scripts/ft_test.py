@@ -10,6 +10,7 @@ import diffusers
 import torch
 import torch.nn.functional as F
 import torch.utils.checkpoint
+import torch.nn as nn
 import yaml
 from accelerate import Accelerator
 from accelerate.logging import get_logger
@@ -702,10 +703,11 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
-                # --- Simplified img_ids Placeholder --- 
-                # Let's try providing a simple placeholder shape [bsz, 1] like txt_ids was
-                img_ids = torch.zeros(bsz, 1, dtype=torch.long, device=accelerator.device)
-                logger.debug(f"Using simplified placeholder img_ids: {img_ids.shape}")
+                # --- Revert img_ids to arange --- 
+                # Generate img_ids tensor based on latents_reshaped dimensions, mimicking internal transformer logic
+                seq_len = latents_reshaped.shape[1]
+                img_ids = torch.arange(seq_len, device=latents.device).repeat(bsz, 1)
+                logger.debug(f"Using arange-based img_ids: {img_ids.shape}")
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
@@ -825,9 +827,10 @@ def main(args):
                     latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
                     logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
-                    # --- Simplified img_ids Placeholder (Validation) --- 
-                    img_ids_val = torch.zeros(bsz_val, 1, dtype=torch.long, device=accelerator.device)
-                    logger.debug(f"Using simplified placeholder img_ids_val: {img_ids_val.shape}")
+                    # --- Revert img_ids to arange (Validation) --- 
+                    seq_len_val = latents_reshaped_val.shape[1]
+                    img_ids_val = torch.arange(seq_len_val, device=latents.device).repeat(bsz_val, 1)
+                    logger.debug(f"Using arange-based img_ids_val: {img_ids_val.shape}")
 
                     # Encode prompts for validation batch
                     with torch.no_grad():
