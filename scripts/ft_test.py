@@ -409,8 +409,8 @@ def main(args):
         transformer_lora_config = LoraConfig(
             r=args.lora_rank,
             lora_alpha=args.lora_rank, # Often set equal to rank
-            # [Bug 1.4] Use correct FLUX attention module names
-            target_modules=["q_proj", "k_proj", "v_proj"],
+            # [Bug 1.4] Use correct FLUX attention module names (actual: to_q, to_k, to_v)
+            target_modules=["to_q", "to_k", "to_v"],
             lora_dropout=0.1, # Optional dropout
             bias="none",
         )
