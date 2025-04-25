@@ -673,6 +673,53 @@ def main(args):
                 timesteps = timesteps.long()
                 noisy_latents = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
 
+                # --- Handle Unconditional Training (Missing Text Embeddings) --- #
+                # Check if text conditioning inputs are present in the batch
+                batch_prompt_embeds_2 = batch.get("prompt_embeds_2", None)
+                batch_clip_pooled = batch.get("pooled_prompt_embeds", None) # Key is 'pooled_prompt_embeds' in batch
+                batch_input_ids_2 = batch.get("input_ids_2", None)
+
+                # Get expected embedding dimensions
+                t5_embed_dim = transformer.config.cross_attention_dim # e.g., 4096
+                clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
+                null_sequence_length = 1 # Define a minimal length for null sequences
+
+                # Create null T5 embeddings if needed
+                if batch_prompt_embeds_2 is None:
+                    null_t5_embeds = torch.zeros(
+                        bsz, null_sequence_length, t5_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    prompt_embeds_2 = null_t5_embeds
+                    logger.debug(f"Created null T5 embeds: {prompt_embeds_2.shape}")
+                else:
+                    prompt_embeds_2 = batch_prompt_embeds_2
+
+                # Create null CLIP pooled projections if needed
+                if batch_clip_pooled is None:
+                    null_clip_pooled = torch.zeros(
+                        bsz, clip_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    clip_pooled = null_clip_pooled
+                    logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
+                else:
+                    clip_pooled = batch_clip_pooled
+
+                # Create null T5 input IDs if needed
+                if batch_input_ids_2 is None:
+                    t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') else 0
+                    null_t5_ids = torch.full(
+                        (bsz, null_sequence_length),
+                        fill_value=t5_pad_token_id,
+                        dtype=torch.long, device=accelerator.device
+                    )
+                    input_ids_2 = null_t5_ids
+                    logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
+                else:
+                    input_ids_2 = batch_input_ids_2
+                # --- End Unconditional Handling --- #
+
                 # Log shapes before transformer call (using prepared variables)
                 logger.debug(f"Shape BEFORE transformer call - noisy_latents: {noisy_latents.shape}")
                 logger.debug(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
