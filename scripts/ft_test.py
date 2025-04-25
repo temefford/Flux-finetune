@@ -215,10 +215,20 @@ def preprocess_single_example(example, dataset_abs_path, image_transforms, image
             return {"pixel_values": None, "input_ids_2": None}
 
         # --- Return Processed Example --- #
-        return {
-            "pixel_values": pixel_values_tensor,
-            "input_ids_2": input_ids_2_tensor,
-        }
+        result = {}
+        if pixel_values_tensor is not None:
+            result["pixel_values"] = pixel_values_tensor
+            logger.debug(f"Preprocess check - pixel_values type: {type(result['pixel_values'])}, shape: {result['pixel_values'].shape if isinstance(result['pixel_values'], torch.Tensor) else 'N/A'}")
+        else:
+            logger.debug("Preprocess check - pixel_values is None")
+
+        if input_ids_2_tensor is not None:
+            result["input_ids_2"] = input_ids_2_tensor
+            logger.debug(f"Preprocess check - input_ids_2 type: {type(result['input_ids_2'])}, shape: {result['input_ids_2'].shape if isinstance(result['input_ids_2'], torch.Tensor) else 'N/A'}")
+        else:
+            logger.debug("Preprocess check - input_ids_2 is None")
+
+        return result
 
     except Exception as e:
         logger.error(f"General error processing example: {example}. Error: {e}", exc_info=True)
@@ -576,8 +586,19 @@ def main(args):
                 "input_ids_2": input_ids_2,
             }
             return batch
+        except TypeError as e:
+            logger.error(f"Error during collate_fn stacking: {e}")
+            # ENHANCED LOG: Log the types of the first few problematic items in the list before stacking
+            logger.error(f"  Collate Troubleshoot - Attempting to stack {len([example['pixel_values'] for example in valid_examples])} pixel_values items.")
+            for i, pv_item in enumerate([example['pixel_values'] for example in valid_examples][:5]): # Log first 5 pixel_values items
+                logger.error(f"    Item {i} in pixel_values_list type: {type(pv_item)}")
+            logger.error(f"  Collate Troubleshoot - Attempting to stack {len([example['input_ids_2'] for example in valid_examples])} input_ids_2 items.")
+            for i, iid2_item in enumerate([example['input_ids_2'] for example in valid_examples][:5]): # Log first 5 input_ids_2 items
+                 logger.error(f"    Item {i} in input_ids_2_list type: {type(iid2_item)}")
+
+            return None # Return None if stacking fails
         except Exception as e:
-            logger.error(f"Error during collate_fn stacking: {e}", exc_info=True)
+            logger.error(f"Unexpected error in collate_fn: {e}", exc_info=True)
             # Log tensor shapes for debugging if possible
             for i, ex in enumerate(valid_examples):
                 pv_shape = ex['pixel_values'].shape if isinstance(ex.get('pixel_values'), torch.Tensor) else 'Not Tensor or None'

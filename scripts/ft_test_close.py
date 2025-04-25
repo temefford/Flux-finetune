@@ -625,6 +625,7 @@ def main(args):
         logger.debug(f"Collate - Processing {len(valid_examples)} valid examples out of {len(examples)} original.")
         for i, example in enumerate(valid_examples):
             pv = example.get("pixel_values")
+            print(f"DEBUG Collate Loop - Example {i} - pv type BEFORE check: {type(pv)}") # <-- Add this line
             ids2 = example.get("input_ids_2")
             pv_type = type(pv).__name__
             ids2_type = type(ids2).__name__
