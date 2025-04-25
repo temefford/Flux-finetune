@@ -749,38 +749,40 @@ def main(args):
                 # Store original input_ids_2 state for conditional logic
                 original_input_ids_2_is_none = input_ids_2 is None
 
-                # Build transformer arguments conditionally
-                transformer_kwargs = {
-                    'hidden_states': latents_reshaped,
-                    'timestep': timesteps, # Add this line
-                    'encoder_hidden_states': prompt_embeds_2, # Placeholder is created above if needed
-                    'pooled_projections': clip_pooled,       # Placeholder is created above if needed
-                    'img_ids': img_ids,
-                    # We will conditionally add 'txt_ids' below
-                }
-
-                if not original_input_ids_2_is_none:
-                    # Only add txt_ids if it was present in the batch
-                    transformer_kwargs['txt_ids'] = input_ids_2
-                    logger.debug(f"  Passing txt_ids with shape: {input_ids_2.shape}")
-                else:
-                    logger.debug("  Skipping txt_ids argument for image-only batch.")
+                # Ensure input_ids_2 is None for image-only batches before the call
+                if input_ids_2 is None:
+                    # This confirmation might seem redundant if it comes in as None, 
+                    # but ensures it's explicitly None before passing.
+                    input_ids_2 = None 
+                    logger.warning("Confirmed input_ids_2 is None for image-only batch.")
 
                 # Predict the noise residual using the transformer model
-                # Pass the prepared conditional inputs (which might be None for text)
-                logger.debug(f"  transformer input shape - hidden_states: {transformer_kwargs['hidden_states'].shape}")
-                logger.debug(f"  transformer input shape - timestep: {transformer_kwargs['timestep'].shape}") # Add this log
-                logger.debug(f"  transformer input shape - encoder_hidden_states: {transformer_kwargs['encoder_hidden_states'].shape}")
-                logger.debug(f"  transformer input shape - pooled_projections: {transformer_kwargs['pooled_projections'].shape}")
-                logger.debug(f"  transformer input shape - img_ids: {transformer_kwargs['img_ids'].shape}")
-                # Log txt_ids shape only if it exists in kwargs
-                if 'txt_ids' in transformer_kwargs:
-                     logger.debug(f"  transformer input shape - txt_ids: {transformer_kwargs['txt_ids'].shape}")
+                # Pass the prepared conditional inputs (placeholders or None)
+                logger.debug(f"  transformer input shape - hidden_states: {latents_reshaped.shape}")
+                logger.debug(f"  transformer input shape - timestep: {timesteps.shape}") 
+                logger.debug(f"  transformer input shape - encoder_hidden_states: {prompt_embeds_2.shape}") # Placeholder ensured
+                logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled.shape}")       # Placeholder ensured
+                logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
+                # Log txt_ids shape only if it exists 
+                if input_ids_2 is not None:
+                     logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape}")
                 else:
-                     logger.debug(f"  transformer input shape - txt_ids: None (skipped)")
+                     logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
 
+                # Revert to creating a minimal placeholder for input_ids_2
+                if original_input_ids_2_is_none:
+                     input_ids_2 = torch.zeros(bsz, 1, dtype=torch.long, device=accelerator.device)
+                     logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
 
-                model_pred = transformer(**transformer_kwargs)
+                # Pass arguments explicitly
+                model_pred = transformer(
+                    hidden_states=latents_reshaped,
+                    timestep=timesteps,
+                    encoder_hidden_states=prompt_embeds_2,
+                    pooled_projections=clip_pooled,
+                    img_ids=img_ids,
+                    txt_ids=input_ids_2 # Pass the placeholder tensor
+                )
 
                 # Assume prediction target is the noise (epsilon prediction)
                 target = noise
