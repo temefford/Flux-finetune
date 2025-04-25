@@ -53,10 +53,18 @@ def parse_args():
     # Create Namespace from YAML config
     args = argparse.Namespace(**config)
 
+    # --- Map config keys to expected attribute names --- #
+    # Ensure dataset_path is populated from data_dir in config if it exists
+    # This is the crucial step to ensure the config value is used by default
+    if hasattr(args, 'data_dir') and not hasattr(args, 'dataset_path'):
+        args.dataset_path = args.data_dir
+        # Logging will happen in main() after accelerator is initialized
+        # logger.info(f"Using data_dir '{args.data_dir}' from config as dataset_path.")
+
     # Apply command-line overrides (if provided)
     # Logging will happen in main() after accelerator is initialized
     if cmd_args.data_dir:
-        args.dataset_path = cmd_args.data_dir # Note: config key is dataset_path
+        args.dataset_path = cmd_args.data_dir # Override whatever was set from config
     if cmd_args.output_dir:
         args.output_dir = cmd_args.output_dir
 
