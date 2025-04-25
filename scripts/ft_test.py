@@ -1277,9 +1277,6 @@ def log_transformer_inputs(logger, hidden_states, timestep, encoder_hidden_state
 if __name__ == "__main__":
     # --- Argument Parsing --- #
     args = parse_args()
-    print("--- Parsed Arguments ---")
-    print(vars(args))
-    print("----------------------")
  
     # --- Main Execution --- #
     main(args)
