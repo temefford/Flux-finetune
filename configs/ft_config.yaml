@@ -24,7 +24,7 @@ checkpointing_steps: 100       # Save checkpoints periodically (adjust based on 
 
 # --- Dataset Configuration (for ft_test.py) ---
 dataset_type: "hf_metadata"
-data_dir: "/workspace/Flux-finetune/data/sorted_art/Abstract-Art" # Or your local path
+data_dir: "/workspace/Flux-finetune/data/sorted_art/Baroque" # Or your local path
 image_column: "hash"      # Column containing image identifier (used to find <hash>.jpg)
 caption_column: "caption" # Column containing the text caption
 validation_split: 0.1                 # Percentage of data to use for validation (10%)
