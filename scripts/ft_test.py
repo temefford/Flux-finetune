@@ -638,6 +638,7 @@ def main(args):
                      # Handle error or create placeholders if appropriate
                      clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
                      clip_pooled = torch.zeros(batch_size, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                     logger.debug(f"Created placeholder clip_pooled: {clip_pooled.shape}")
                      # Keep text IDs/embeds as None
 
             # --- Handle Missing Conditioning Inputs (Create Placeholders) --- #
