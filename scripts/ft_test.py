@@ -752,6 +752,7 @@ def main(args):
                 # Build transformer arguments conditionally
                 transformer_kwargs = {
                     'hidden_states': latents_reshaped,
+                    'timestep': timesteps, # Add this line
                     'encoder_hidden_states': prompt_embeds_2, # Placeholder is created above if needed
                     'pooled_projections': clip_pooled,       # Placeholder is created above if needed
                     'img_ids': img_ids,
@@ -768,6 +769,7 @@ def main(args):
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
                 logger.debug(f"  transformer input shape - hidden_states: {transformer_kwargs['hidden_states'].shape}")
+                logger.debug(f"  transformer input shape - timestep: {transformer_kwargs['timestep'].shape}") # Add this log
                 logger.debug(f"  transformer input shape - encoder_hidden_states: {transformer_kwargs['encoder_hidden_states'].shape}")
                 logger.debug(f"  transformer input shape - pooled_projections: {transformer_kwargs['pooled_projections'].shape}")
                 logger.debug(f"  transformer input shape - img_ids: {transformer_kwargs['img_ids'].shape}")
