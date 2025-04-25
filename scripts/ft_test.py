@@ -712,10 +712,24 @@ def main(args):
                 logger.debug(f"Using arange-based img_ids: {img_ids.shape}")
 
                 # Handle case where 'caption' is not in the batch (image-only dataset)
-                if input_ids_2 is None:
+                if args.dataset_type == "imagefolder":
                     # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
                     input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
                     logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
+                    # Create placeholder T5 embeddings matching img_ids seq_len to avoid passing None to context_embedder
+                    prompt_embeds_2 = torch.zeros(bsz, seq_len, t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug(f"Using placeholder prompt_embeds_2 matching img_ids seq_len: {prompt_embeds_2.shape}")
+
+                # Ensure conditioning inputs exist (prevent NoneType for context_embedder)
+                if prompt_embeds_2 is None:
+                    prompt_embeds_2 = torch.zeros(bsz, seq_len, t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug(f"Placeholder prompt_embeds_2: {prompt_embeds_2.shape}")
+                if clip_pooled is None:
+                    clip_pooled = torch.zeros(bsz, clip_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                    logger.debug(f"Placeholder clip_pooled: {clip_pooled.shape}")
+                if input_ids_2 is None:
+                    input_ids_2 = torch.zeros(bsz, seq_len, dtype=torch.long, device=accelerator.device)
+                    logger.debug(f"Placeholder input_ids_2: {input_ids_2.shape}")
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
@@ -733,6 +747,7 @@ def main(args):
                 logger.debug(f"  transformer input type - txt_ids: {type(input_ids_2)}")
                 logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape if input_ids_2 is not None else 'None'}")
                 logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
+
                 model_pred = transformer(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
@@ -845,6 +860,9 @@ def main(args):
                         # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
                         input_ids_2 = torch.zeros(bsz_val, seq_len_val, dtype=torch.long, device=accelerator.device)
                         logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
+                        # Create placeholder T5 embeddings matching img_ids seq_len to avoid passing None to context_embedder
+                        prompt_embeds_2 = torch.zeros(bsz_val, seq_len_val, t5_embed_dim, dtype=weight_dtype, device=accelerator.device)
+                        logger.debug(f"Using placeholder prompt_embeds_2 matching img_ids seq_len: {prompt_embeds_2.shape}")
                     else:
                         input_ids_2 = val_batch['input_ids_2'].to(accelerator.device)
 
