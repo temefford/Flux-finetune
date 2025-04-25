@@ -176,13 +176,11 @@ def preprocess_func(examples, **fn_kwargs):
 
     # 2. Tokenize Captions (Handle 'imagefolder' case)
     if args.dataset_type == "imagefolder":
-        # Generate dummy captions (empty strings) for imagefolder
+        # Generate dummy captions and add them directly to the examples dict
         num_examples = len(images) # Use length of successfully loaded images
-        dummy_captions_list = ["" for _ in range(num_examples)]
-        # Create a temporary dict mimicking the structure expected by tokenize_captions
-        # Use the caption_column name specified in args for the key
-        caption_examples = {args.caption_column: dummy_captions_list}
-        captions = tokenize_captions((tokenizer, tokenizer_2), caption_examples, text_column=args.caption_column)
+        examples[args.caption_column] = ["" for _ in range(num_examples)] # Add dummy captions under the expected key
+        # Now call tokenize_captions with the modified examples dict
+        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
     elif args.dataset_type == "hf_metadata": # Assuming hf_metadata has the caption column
         # Check if caption column exists before accessing
         if args.caption_column not in examples:
