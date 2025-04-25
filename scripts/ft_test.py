@@ -711,7 +711,7 @@ def main(args):
                 row_ids = torch.arange(height, device=latents.device)
                 col_ids = torch.arange(width, device=latents.device)
                 grid_coords = torch.stack(torch.meshgrid(row_ids, col_ids, indexing="ij"), dim=-1).reshape(seq_len, 2)
-                img_ids = grid_coords.unsqueeze(0).repeat(bsz, 1, 1) # Add batch dimension
+                img_ids = grid_coords
                 logger.debug(f"Generated 2D img_ids shape: {img_ids.shape}")
 
                 # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
@@ -878,7 +878,7 @@ def main(args):
                     row_ids_val = torch.arange(height_val, device=latents.device)
                     col_ids_val = torch.arange(width_val, device=latents.device)
                     grid_coords_val = torch.stack(torch.meshgrid(row_ids_val, col_ids_val, indexing="ij"), dim=-1).reshape(seq_len_val, 2)
-                    img_ids_val = grid_coords_val.unsqueeze(0).repeat(bsz_val, 1, 1)
+                    img_ids_val = grid_coords_val
                     logger.debug(f"Generated validation 2D img_ids shape: {img_ids_val.shape}")
 
                     # Sample noise and timesteps for validation
