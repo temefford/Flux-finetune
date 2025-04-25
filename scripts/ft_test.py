@@ -593,6 +593,14 @@ def main(args):
     else:
         raise ValueError(f"Unsupported dataset_type: {args.dataset_type}")
 
+    # --- Filter out invalid examples after preprocessing --- #
+    def is_valid(example):
+        return example["pixel_values"] is not None and example["input_ids_2"] is not None
+    before_count = len(processed_dataset)
+    processed_dataset = processed_dataset.filter(is_valid)
+    after_count = len(processed_dataset)
+    logger.info(f"Filtered dataset: {after_count} valid examples out of {before_count} after preprocessing.")
+
     # --- Split Dataset --- #
     if args.validation_split > 0.0:
         split_seed = getattr(args, 'split_seed', args.seed)
