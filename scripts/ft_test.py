@@ -311,9 +311,9 @@ def main(args):
     )
 
     # --- Dataset Loading and Preprocessing ---
-    # Calculate absolute dataset path relative to the script's location
-    script_dir = os.path.dirname(__file__)
-    dataset_abs_path = os.path.abspath(os.path.join(script_dir, args.dataset_path))
+    # Calculate absolute dataset path relative to the current working directory
+    dataset_abs_path = os.path.abspath(args.dataset_path)
+
     logger.info(f"Loading dataset. Type: {args.dataset_type}, Path: {dataset_abs_path}")
 
     # --- Load based on type ---
