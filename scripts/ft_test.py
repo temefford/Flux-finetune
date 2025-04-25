@@ -575,7 +575,7 @@ def main(args):
                 attention_mask_2 = batch["attention_mask_2"]
 
                 # Move pixel values to device and cast to VAE's expected dtype
-                pixel_values_device = pixel_values
+                pixel_values_device = pixel_values.to(accelerator.device, dtype=weight_dtype)
 
                 # Encode pixel values -> latents
                 # VAE is already on the correct device and dtype (float16)
@@ -717,7 +717,7 @@ def main(args):
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
                     # Ensure pixel_values are on the correct device and dtype
-                    pixel_values_device = val_batch["pixel_values"]
+                    pixel_values_device = val_batch["pixel_values"].to(accelerator.device, dtype=weight_dtype)
 
                     # Encode pixel values -> latents
                     # VAE is already on the correct device and dtype (float16)
