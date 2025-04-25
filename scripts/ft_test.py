@@ -296,6 +296,11 @@ def main(args):
         tokenizer_2 = pipeline.tokenizer_2
         logger.info("Tokenizers extracted.")
 
+        # Instantiate a standard diffusion scheduler FOR THE TRAINING LOOP NOISE ADDITION
+        # Use the config from the original scheduler to maintain compatibility (e.g., num_steps)
+        train_noise_scheduler = diffusers.DDPMScheduler.from_config(pipeline.scheduler.config)
+        logger.info(f"Instantiated {type(train_noise_scheduler).__name__} for training noise addition.")
+
     except Exception as e:
         logger.error(f"Failed to load models or components: {e}")
         return
@@ -596,9 +601,9 @@ def main(args):
 
                 # Sample noise and timesteps
                 noise = torch.randn_like(latents_reshaped)
-                timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (batch_size,), device=latents_reshaped.device)
+                timesteps = torch.randint(0, train_noise_scheduler.config.num_train_timesteps, (batch_size,), device=latents_reshaped.device)
                 timesteps = timesteps.long()
-                noisy_latents = noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
+                noisy_latents = train_noise_scheduler.add_noise(latents_reshaped, noise, timesteps)
 
                 # Log shapes before transformer call
                 logger.debug(f"Shape BEFORE transformer call - noisy_latents: {noisy_latents.shape}")
@@ -739,9 +744,9 @@ def main(args):
 
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents_reshaped_val)
-                    timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz_val,), device=latents_reshaped_val.device)
+                    timesteps = torch.randint(0, train_noise_scheduler.config.num_train_timesteps, (bsz_val,), device=latents_reshaped_val.device)
                     timesteps = timesteps.long()
-                    noisy_latents_val = noise_scheduler.add_noise(latents_reshaped_val, noise, timesteps)
+                    noisy_latents_val = train_noise_scheduler.add_noise(latents_reshaped_val, noise, timesteps)
 
                     # Predict noise using the model
                     model_pred_val = transformer(

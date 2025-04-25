@@ -1,27 +1,46 @@
-# Configuration for FLUX.1-schnell LoRA Finetuning on H200 GPU
+# Configuration for FLUX.1-schnell LoRA Finetuning using ft_test.py
 
 model_id: "black-forest-labs/FLUX.1-schnell"
+base_model_revision: "main" # Specify a revision if needed
+
+# --- Training Hyperparameters ---
 peft_method: "LoRA"
 lora_rank: 16                # Rank for LoRA matrices (e.g., 4, 8, 16, 32)
 lora_dropout: 0.1           # Dropout probability for LoRA layers
-learning_rate: 1e-4            # Initial learning rate (after the potential warmup period)
-lr_scheduler: "constant"  # Type of learning rate schedule (e.g., "linear", "cosine", "constant")
+learning_rate: 0.0001           # Adjusted learning rate
+lr_scheduler: "constant"     # Learning rate scheduler type (e.g., constant, cosine)
 lr_warmup_steps: 0        # Number of steps for the warmup phase
-batch_size: 16                 # Per-device batch size (Adjust based on VRAM)
+batch_size: 16           # Per-device batch size (Adjust based on VRAM)
 gradient_accumulation_steps: 2 # Accumulate gradients (16 * 2 = effective batch size 32)
-epochs: 1                      # Number of training epochs
+epochs: 10                      # Number of training epochs
 mixed_precision: "fp16"        # Use bfloat16 mixed precision for H100/H200
-output_dir: "outputs"          # Relative path from script location (will be created in /workspace/fine-tuning)
+output_dir: "outputs"          # Relative path where outputs will be saved
 seed: 42
+logging_steps: 10            # Log metrics every N steps
+save_steps: 100               # Save checkpoints every N steps
 device: "cuda"                 # Use NVIDIA CUDA
 image_resolution: 1024          # Target resolution for FLUX
 checkpointing_steps: 100       # Save checkpoints periodically (adjust based on dataset size/epoch length)
-dataset_path: "/workspace/Flux-finetune/data/sorted_art/Abstract-Art" # Absolute path to dataset directory on Runpod
+
+# --- Dataset Configuration (for ft_test.py) ---
+data_dir: "/workspace/Flux-finetune/data/sorted_art/Abstract-Art" # Path to data directory
 image_column: "image"      # Column name for image file paths in metadata.json (use hash as filename base)
 caption_column: "text"      # Column name for text captions in metadata.json
 dataset_type: "imagefolder"    # Type of dataset structure (imagefolder, hf_metadata, etc.)
-resolution: 1024
-num_workers: 4                 # Number of subprocesses for data loading
-val_split: 0.1                 # Percentage of data to use for validation (10%)
+validation_split: 0.1                 # Percentage of data to use for validation (10%)
 validation_batch_size: 32      # Batch size for validation
 max_train_steps: -1            # Max training steps (set to -1 to use epochs)
+
+# --- Removed Axolotl 'datasets' block ---
+
+# --- Optional: WandB --- #
+# wandb_project: "flux-finetune"
+# wandb_entity: "your_wandb_username"
+# wandb_log_model: "checkpoint" # Log model checkpoints to WandB
+
+# --- Other settings used by ft_test.py ---
+dataloader_num_workers: 4 # Number of workers for DataLoader
+preprocessing_num_workers: 1 # Number of workers for dataset preprocessing
+vae_path: null # Optional path to a specific VAE, null uses the one from the pipeline
+vae_from_scratch: false # Optional: Train VAE from scratch
+vae_projection_method: "conv" # Method for VAE->Transformer projection ('linear', 'conv')
