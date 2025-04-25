@@ -356,32 +356,44 @@ def main(args):
         logger.warning(f"PEFT method '{args.peft_method}' not implemented for this script. Training full model.")
         transformer.requires_grad_(True) # Train full transformer if not LoRA
 
-    # --- Define Projection Layer for VAE->Transformer Channel Mismatch ---
+    # --- Define Projection Layer for VAE->Transformer Channel Mismatch --- 
     # Based on confirmed config values and runtime checks
     vae_latent_channels_actual = vae.config.latent_channels # Should be 16
     transformer_in_channels_actual = transformer.config.in_channels # Should be 64
- 
+    vae_to_transformer_projection = None # Initialize as None
+    params_to_optimize = list(transformer.parameters()) # Start with transformer params (LoRA or full)
+
     if vae_latent_channels_actual != transformer_in_channels_actual:
+        projection_method = getattr(args, 'vae_projection_method', 'conv').lower()
         logger.warning(
             f"Runtime shape mismatch detected: VAE output {vae_latent_channels_actual} channels, "
-            f"Transformer input {transformer_in_channels_actual} channels. Adding projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
+            f"Transformer input {transformer_in_channels_actual} channels. "
+            f"Adding '{projection_method}' projection layer {vae_latent_channels_actual}->{transformer_in_channels_actual}."
         )
-        vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
+        
+        if projection_method == 'conv':
+            # Use Conv2d for spatial data (B, C_in, H, W) -> (B, C_out, H, W)
+            vae_to_transformer_projection = torch.nn.Conv2d(
+                vae_latent_channels_actual,
+                transformer_in_channels_actual,
+                kernel_size=1 # 1x1 convolution acts like a per-pixel linear layer across channels
+            )
+        elif projection_method == 'linear':
+            # Use Linear - WARNING: This likely requires reshaping latents BEFORE projection
+            # Current code applies projection before reshaping, suitable for Conv2d
+            logger.warning("Using 'linear' projection. Ensure latents are reshaped before this layer if needed.")
+            vae_to_transformer_projection = torch.nn.Linear(vae_latent_channels_actual, transformer_in_channels_actual)
+        else:
+            raise ValueError(f"Unsupported vae_projection_method: {projection_method}. Choose 'conv' or 'linear'.")
+
+        # Move projection layer to device/dtype and add its parameters for optimization
         vae_to_transformer_projection.to(accelerator.device, dtype=weight_dtype)
-    else:
-        # This case seems unlikely given the error, but included for completeness
-        logger.info("VAE output and Transformer input channels match according to configs.")
-        vae_to_transformer_projection = None
- 
-    # --- Optimizer Setup --- 
-    params_to_optimize = list(filter(lambda p: p.requires_grad, transformer.parameters()))
-    if vae_to_transformer_projection is not None:
-        # Ensure projection layer params require grad and add them
-        for param in vae_to_transformer_projection.parameters():
-            param.requires_grad = True 
         params_to_optimize.extend(vae_to_transformer_projection.parameters())
         logger.info("Added VAE->Transformer projection layer parameters to optimizer.")
 
+    # If no projection needed, params_to_optimize just contains transformer parameters
+    # --- Optimizer Setup --- 
+    # Use AdamW optimizer (common for transformer models)
     optimizer = torch.optim.AdamW(
         params_to_optimize,
         lr=float(args.learning_rate), # Ensure learning_rate is float
