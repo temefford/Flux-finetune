@@ -24,6 +24,7 @@ from tqdm.auto import tqdm
 import numpy as np # Import numpy for type checking
 import logging
 import traceback
+import json
 
 logger = get_logger(__name__)
 
@@ -316,6 +317,102 @@ def preprocess_imagefolder(examples, image_transforms, image_column):
         logger.error(f"Error during imagefolder preprocessing batch: {e}")
         return {"pixel_values": None, "input_ids_2": None}
 
+# --- New Transform Function for set_transform --- #
+def transform_example(example, dataset_abs_path, image_transforms, image_column, caption_column, hash_column, tokenizer_2, text_id_map=None):
+    # Use the global logger instance configured in main
+    logger = logging.getLogger(__name__)
+
+    # Get image path and caption
+    image_hash = example.get(hash_column)
+    caption = str(example.get(caption_column)) if example.get(caption_column) is not None else ""
+
+    if not image_hash:
+        logger.warning(f"Missing hash_column '{hash_column}' in example: {example}. Skipping.")
+        return None
+
+    path = os.path.join(dataset_abs_path, image_hash + ".jpg") # Assuming jpg
+
+    pixel_values = None
+    input_ids_2 = None
+    text_ids = None # Optional
+
+    try:
+        # 1. Load Image
+        img = Image.open(path).convert("RGB")
+        # logger.debug(f"Loaded image {os.path.basename(path)}: Mode={img.mode}, Size={img.size}, Format={img.format}") # Can be verbose
+
+        # 2. Process Image (apply transforms)
+        image_input = image_transforms(img) # Process single image
+
+        if isinstance(image_input, torch.Tensor):
+            pixel_values = image_input
+        elif isinstance(image_input, dict) and 'pixel_values' in image_input:
+             pv_maybe_numpy_or_tensor = image_input['pixel_values']
+             if isinstance(pv_maybe_numpy_or_tensor, np.ndarray):
+                 pixel_values = torch.from_numpy(pv_maybe_numpy_or_tensor)
+             elif isinstance(pv_maybe_numpy_or_tensor, torch.Tensor):
+                  pixel_values = pv_maybe_numpy_or_tensor
+             else:
+                  logger.warning(f"Unexpected type for pixel_values in dict: {type(pv_maybe_numpy_or_tensor)} for {path}")
+        else:
+             logger.error(f"Unexpected output type from image_transforms: {type(image_input)} for {path}")
+
+        if pixel_values is not None and not isinstance(pixel_values, torch.Tensor):
+             try:
+                 # Ensure conversion to float32, common for image tensors
+                 pixel_values = torch.tensor(pixel_values, dtype=torch.float32)
+             except Exception as convert_err:
+                 logger.error(f"Failed convert pixel_values (type: {type(pixel_values)}) to tensor: {convert_err} for {path}. Setting to None.")
+                 pixel_values = None
+
+        if pixel_values is None:
+             # logger.warning(f"Failed to get valid pixel_values tensor for {path}. Skipping example.")
+             return None # Signal to collate_fn to skip
+
+
+        # 3. Process Text (tokenize caption)
+        max_len = getattr(tokenizer_2, 'model_max_length', 512)
+        text_inputs = tokenizer_2(
+            caption, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
+        )
+        input_ids_2 = text_inputs['input_ids'].squeeze(0) # Remove batch dim -> [SeqLen]
+
+        # 4. Get Text IDs (optional)
+        if text_id_map is not None and hash_column in example:
+            text_ids_val = text_id_map.get(example[hash_column], None)
+            if text_ids_val is not None:
+                # Assuming text_ids need conversion to tensor
+                try:
+                     text_ids = torch.tensor(text_ids_val, dtype=torch.long)
+                except Exception:
+                     logger.warning(f"Could not convert text_ids to tensor for {path}")
+                     text_ids = None
+
+
+    except FileNotFoundError:
+        # logger.warning(f"Image file not found: {path}. Skipping example.")
+        return None # Signal to collate_fn to skip
+    except Exception as e:
+        logger.error(f"Error processing example: {e}") # Use the variable 'e'
+        return None # Signal to collate_fn to skip
+
+    # Return processed dictionary
+    processed = {
+        "pixel_values": pixel_values.detach() if pixel_values is not None else None,
+        "input_ids_2": input_ids_2.detach() if input_ids_2 is not None else None,
+    }
+    if text_ids is not None:
+         processed["text_ids"] = text_ids.detach()
+
+    # Filter out examples where essential tensors are None right before returning
+    if processed["pixel_values"] is None or processed["input_ids_2"] is None:
+        # logger.warning(f"Returning None because essential tensors are missing for {path}.")
+        return None
+
+    return processed
+
+# --- End New Transform Function --- #
+
 # --- Main Function ---
 def main(args):
     # === Configure Logging ===
@@ -575,7 +672,7 @@ def main(args):
         processed_dataset = dataset.map(
             _preprocess_train_func,
             batched=True,
-            num_proc=1, # Force single process for debugging
+            num_proc=args.preprocessing_num_workers,
             remove_columns=columns_to_remove,
             desc="Running tokenizer on train dataset",
         )
@@ -597,7 +694,7 @@ def main(args):
         processed_dataset = dataset.map(
              _preprocess_imagefolder_func,
              batched=True,
-             num_proc=1, # Force single process for debugging
+             num_proc=args.preprocessing_num_workers,
              remove_columns=columns_to_remove,
              desc="Running preprocessing on imagefolder dataset",
         )
@@ -617,174 +714,89 @@ def main(args):
         eval_dataset = None
         logger.info(f"Train dataset size: {len(train_dataset)}")
 
-    # --- Create DataLoader --- #
-    logger.info("Creating DataLoader...")
-    # Collate function
+    # Load text_ids if provided
+    text_id_map = None
+    if args.text_ids_json_path:
+        # Ensure text_id_map is loaded *before* setting the transform
+        try:
+            with open(args.text_ids_json_path, 'r') as f:
+                text_id_map = json.load(f)
+        except Exception as e:
+            logger.error(f"Failed to load text_id_map from {args.text_ids_json_path}: {e}")
+            return
+
+    # --- Set Transform for Lazy Processing --- #
+    # Define the transform function with necessary arguments fixed
+    _transform_func = partial(
+        transform_example, # Use the NEW function
+        dataset_abs_path=args.data_dir,
+        image_transforms=pipeline.image_processor.preprocess,
+        image_column=args.image_column,
+        caption_column=args.caption_column,
+        hash_column=args.hash_column,
+        tokenizer_2=tokenizer_2,
+        text_id_map=text_id_map # Pass the loaded map
+    )
+
+    # Define columns expected by the transform function (input columns)
+    transform_input_columns = [args.hash_column, args.caption_column]
+    if args.text_ids_json_path:
+        transform_input_columns.append(args.text_ids_column)
+    # For ImageFolder, the input is just 'image'
+    if args.dataset_type == "imagefolder":
+        transform_input_columns = [args.image_column]
+
+    logger.info(f"Setting transform function for dataset (Input columns: {transform_input_columns})")
+    train_dataset.set_transform(_transform_func, columns=transform_input_columns)
+    if eval_dataset:
+        eval_dataset.set_transform(_transform_func, columns=transform_input_columns)
+
+    # --- DataLoader --- #
+    # Define collate_fn before DataLoader
     def collate_fn(examples):
         """Collates preprocessed examples into batches, filtering out invalid entries."""
-        # Filter out entries where pixel_values is None (indicating a preprocessing failure for that example)
-        original_count = len(examples)
-        valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
-        filtered_count = len(valid_examples)
-        logger.debug(f"Collate - Processing {filtered_count} valid examples out of {original_count} original.")
-    
+        # 1. Filter out None values (examples that failed transformation)
+        valid_examples = [ex for ex in examples if ex is not None]
+
         if not valid_examples:
-            logger.warning("Collate - No valid examples in this batch after filtering.")
-            return None
-    
-        for i, example in enumerate(valid_examples):
-            pv = example.get('pixel_values')
-            ids2 = example.get('input_ids_2')
-            pv_type = type(pv)
-            ids2_type = type(ids2)
-            # Log shapes only if they are tensors
-            pv_shape = getattr(pv, 'shape', 'N/A') if isinstance(pv, torch.Tensor) else 'N/A'
-            ids2_shape = getattr(ids2, 'shape', 'N/A') if isinstance(ids2, torch.Tensor) else 'N/A'
-            logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
-    
-        # === Detailed logging for the first valid example ===
-        first_example = valid_examples[0]
-        first_pv = first_example.get('pixel_values')
-        logger.debug(f"Collate - First valid example pixel_values type: {type(first_pv)}")
-        if isinstance(first_pv, list):
-            logger.debug(f"Collate - First valid example pixel_values is a list. Length: {len(first_pv)}")
-            if len(first_pv) > 0:
-                first_pv_elem0 = first_pv[0]
-                logger.debug(f"Collate - First valid example pixel_values[0] type: {type(first_pv_elem0)}")
-                if isinstance(first_pv_elem0, torch.Tensor):
-                    logger.debug(f"Collate - First valid example pixel_values[0] shape: {first_pv_elem0.shape}")
-                elif isinstance(first_pv_elem0, list):
-                    logger.debug(f"Collate - First valid example pixel_values[0] is also a list! Length: {len(first_pv_elem0)}")
-        # =======================================================
-    
+            logger.warning("Collate function received no valid examples in this batch.")
+            return None # Skip batch if all examples failed
+
+        # 2. Extract and stack tensors
         try:
-            # Log type of the first element we plan to stack
-            if valid_examples:
-                first_pv_to_stack = valid_examples[0].get("pixel_values")
-                first_i2_to_stack = valid_examples[0].get("input_ids_2")
-                logger.debug(f"Collate - Attempting to stack. First pixel_values type: {type(first_pv_to_stack)}")
-                if isinstance(first_pv_to_stack, torch.Tensor):
-                    logger.debug(f"Collate - First pixel_values shape: {first_pv_to_stack.shape}")
-                logger.debug(f"Collate - Attempting to stack. First input_ids_2 type: {type(first_i2_to_stack)}")
-                if isinstance(first_i2_to_stack, torch.Tensor):
-                    logger.debug(f"Collate - First input_ids_2 shape: {first_i2_to_stack.shape}")
-    
-            # Attempt to stack by extracting the first element, assuming potential nesting like [Tensor]
-            # If the item is not a list or is empty, assume it's the tensor itself (or handle error if None/unexpected)
-            logger.debug("Attempting to stack pixel_values, handling potential nesting...")
-            pixel_values_to_stack = []
-            for ex in valid_examples:
-                pv = ex.get("pixel_values")
-                if isinstance(pv, list) and len(pv) > 0:
-                    pixel_values_to_stack.append(pv[0]) # Extract tensor from list
-                elif isinstance(pv, torch.Tensor):
-                     pixel_values_to_stack.append(pv) # Assume it's already a tensor
-                else:
-                    # This case shouldn't happen if filtering worked, but log if it does
-                    logger.error(f"Unexpected type for pixel_values during stacking: {type(pv)}. Skipping example.")
-                    # Handle appropriately - maybe raise error or skip example entirely?
-                    # For now, we'll filter later based on lengths matching
-                    pixel_values_to_stack.append(None) # Placeholder
-    
-            input_ids_2_to_stack = []
-            logger.debug("Attempting to stack input_ids_2, handling potential nesting...")
-            for ex in valid_examples:
-                ids2 = ex.get("input_ids_2")
-                if isinstance(ids2, list) and len(ids2) > 0:
-                    input_ids_2_to_stack.append(ids2[0]) # Extract tensor from list
-                elif isinstance(ids2, torch.Tensor):
-                     input_ids_2_to_stack.append(ids2) # Assume it's already a tensor
-                else:
-                    logger.error(f"Unexpected type for input_ids_2 during stacking: {type(ids2)}. Skipping example.")
-                    input_ids_2_to_stack.append(None) # Placeholder
-    
-            # Filter out any None placeholders introduced by errors above
-            final_pixel_values = [p for p in pixel_values_to_stack if p is not None]
-            final_input_ids_2 = [i for i in input_ids_2_to_stack if i is not None]
-    
-            # Ensure lists are not empty and have matching lengths before stacking
-            if not final_pixel_values or not final_input_ids_2 or len(final_pixel_values) != len(final_input_ids_2):
-                 logger.error(f"Mismatch in prepared tensor lists or empty lists after handling nesting/errors. "
-                              f"PixelValues count: {len(final_pixel_values)}, InputIDs2 count: {len(final_input_ids_2)}. Cannot stack.")
-                 return None # Signal error
-    
-            pixel_values = torch.stack(final_pixel_values)
-            input_ids_2 = torch.stack(final_input_ids_2)
-            logger.debug("Stacking successful.")
-    
-            # Assuming text_ids might not always be present or needed (e.g., image-only fine-tuning)
-            # Handle potential KeyError if 'text_ids' wasn't generated or kept
-            text_ids = None
-            if "text_ids" in valid_examples[0] and valid_examples[0].get("text_ids") is not None:
-                text_ids_to_stack = []
-                logger.debug("Attempting to stack text_ids, handling potential nesting...")
-                for ex in valid_examples:
-                    tid = ex.get("text_ids")
-                    # Check if this example's tensors were valid in the previous steps
-                    pv = ex.get("pixel_values")
-                    ids2 = ex.get("input_ids_2")
-                    is_pv_valid = isinstance(pv, list) and len(pv) > 0 and isinstance(pv[0], torch.Tensor) or isinstance(pv, torch.Tensor)
-                    is_ids2_valid = isinstance(ids2, list) and len(ids2) > 0 and isinstance(ids2[0], torch.Tensor) or isinstance(ids2, torch.Tensor)
-    
-                    if not is_pv_valid or not is_ids2_valid:
-                        # Skip text_id if the corresponding image/ids2 was invalid
-                        continue
-    
-                    if isinstance(tid, list) and len(tid) > 0:
-                        text_ids_to_stack.append(tid[0])
-                    elif isinstance(tid, torch.Tensor):
-                        text_ids_to_stack.append(tid)
-                    elif tid is None:
-                         # This might happen if text_ids are optional per example
-                         # We need a consistent way to handle this - skip or add placeholder?
-                         # If skipping, ensure lengths match pixel_values/input_ids_2 lengths
-                         logger.debug("Found None text_ids for a valid example, skipping its text_id.")
-                         # This might lead to length mismatch if not handled carefully.
-                         # Let's assume for now text_ids must be present for all *valid* examples if the column exists.
-                         # If optionality per item is needed, logic needs adjustment.
-                         pass # Or potentially add a placeholder if required and handle later
-                    else:
-                         logger.error(f"Unexpected type for text_ids during stacking: {type(tid)}")
-                         # Decide how to handle - skip? placeholder? error?
-    
-                # Stack only if the list is non-empty and matches the length of other stacked tensors
-                if text_ids_to_stack and len(text_ids_to_stack) == len(pixel_values):
-                    text_ids = torch.stack(text_ids_to_stack)
-                    logger.debug("text_ids stacking successful.")
-                elif "text_ids" in valid_examples[0]: # Only log warning if text_ids were expected
-                    logger.warning(f"Could not stack text_ids. Count after processing: {len(text_ids_to_stack)}, "
-                                   f"Expected count: {len(pixel_values)}")
-    
+            pixel_values = torch.stack([ex["pixel_values"] for ex in valid_examples])
+            input_ids_2 = torch.stack([ex["input_ids_2"] for ex in valid_examples])
+
             batch = {
                 "pixel_values": pixel_values,
                 "input_ids_2": input_ids_2,
             }
-            if text_ids is not None:
-                batch["text_ids"] = text_ids
-    
+
+            # 3. Handle optional text_ids
+            if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
+                # Check if all valid examples have text_ids
+                if all("text_ids" in ex and ex["text_ids"] is not None for ex in valid_examples):
+                    try:
+                        text_ids = torch.stack([ex["text_ids"] for ex in valid_examples])
+                        batch["text_ids"] = text_ids
+                    except Exception as stack_err:
+                        logger.warning(f"Could not stack 'text_ids': {stack_err}. Skipping text_ids for this batch.")
+                else:
+                    logger.warning("Some valid examples are missing 'text_ids'. Skipping text_ids for this batch.")
+
             return batch
-    
-        except (TypeError, IndexError) as e:
-            logger.error(f"Error during collate_fn stacking: {e}")
-            # Log shapes/types for debugging
-            for i, example in enumerate(valid_examples):
-                pv = example.get('pixel_values')
-                i2 = example.get('input_ids_2')
-                # Include type info in error log for non-tensors
-                pv_info = f"shape={getattr(pv, 'shape', 'N/A')}, dtype={getattr(pv, 'dtype', 'N/A')}" if isinstance(pv, torch.Tensor) else f"Not Tensor (type: {type(pv)})"
-                if isinstance(pv, list) and len(pv) > 0:
-                    pv_info += f", element[0] type={type(pv[0])}, shape={getattr(pv[0], 'shape', 'N/A')}"
-                i2_info = f"shape={getattr(i2, 'shape', 'N/A')}, dtype={getattr(i2, 'dtype', 'N/A')}" if isinstance(i2, torch.Tensor) else f"Not Tensor (type: {type(i2)})"
-                if isinstance(i2, list) and len(i2) > 0:
-                    i2_info += f", element[0] type={type(i2[0])}, shape={getattr(i2[0], 'shape', 'N/A')}"
-                logger.error(f"  Example {i} info - pixel_values: {pv_info}, input_ids_2: {i2_info}")
-    
-            # Propagate the error or return a special value
-            # For now, return None to indicate a failed batch collation
-            return None
-    
-    # Debug: Force num_workers=0 to see if errors surface from collate_fn
-    logger.info(f"DataLoader num_workers set to 0 for debugging (original value: {args.dataloader_num_workers})")
+
+        except Exception as e:
+            logger.error(f"Error during collate_fn stacking: {e}", exc_info=True)
+            # Log info about the first valid example if stacking failed
+            if valid_examples:
+                first_ex = valid_examples[0]
+                pv = first_ex.get("pixel_values")
+                id2 = first_ex.get("input_ids_2")
+                tid = first_ex.get("text_ids", "N/A")
+                logger.error(f"  First valid example causing stack error - pixel_values type: {type(pv)}, input_ids_2 type: {type(id2)}, text_ids type: {type(tid)}")
+            return None # Skip batch on stacking error
+
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
         shuffle=True,
