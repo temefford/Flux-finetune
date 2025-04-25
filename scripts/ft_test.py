@@ -659,21 +659,91 @@ def main(args):
                 if isinstance(first_i2_to_stack, torch.Tensor):
                     logger.debug(f"Collate - First input_ids_2 shape: {first_i2_to_stack.shape}")
     
-            # Stack directly assuming example["pixel_values"] / example["input_ids_2"] is the tensor
-            pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
-            input_ids_2 = torch.stack([example["input_ids_2"] for example in valid_examples])
+            # Attempt to stack by extracting the first element, assuming potential nesting like [Tensor]
+            # If the item is not a list or is empty, assume it's the tensor itself (or handle error if None/unexpected)
+            logger.debug("Attempting to stack pixel_values, handling potential nesting...")
+            pixel_values_to_stack = []
+            for ex in valid_examples:
+                pv = ex.get("pixel_values")
+                if isinstance(pv, list) and len(pv) > 0:
+                    pixel_values_to_stack.append(pv[0]) # Extract tensor from list
+                elif isinstance(pv, torch.Tensor):
+                     pixel_values_to_stack.append(pv) # Assume it's already a tensor
+                else:
+                    # This case shouldn't happen if filtering worked, but log if it does
+                    logger.error(f"Unexpected type for pixel_values during stacking: {type(pv)}. Skipping example.")
+                    # Handle appropriately - maybe raise error or skip example entirely?
+                    # For now, we'll filter later based on lengths matching
+                    pixel_values_to_stack.append(None) # Placeholder
+    
+            input_ids_2_to_stack = []
+            logger.debug("Attempting to stack input_ids_2, handling potential nesting...")
+            for ex in valid_examples:
+                ids2 = ex.get("input_ids_2")
+                if isinstance(ids2, list) and len(ids2) > 0:
+                    input_ids_2_to_stack.append(ids2[0]) # Extract tensor from list
+                elif isinstance(ids2, torch.Tensor):
+                     input_ids_2_to_stack.append(ids2) # Assume it's already a tensor
+                else:
+                    logger.error(f"Unexpected type for input_ids_2 during stacking: {type(ids2)}. Skipping example.")
+                    input_ids_2_to_stack.append(None) # Placeholder
+    
+            # Filter out any None placeholders introduced by errors above
+            final_pixel_values = [p for p in pixel_values_to_stack if p is not None]
+            final_input_ids_2 = [i for i in input_ids_2_to_stack if i is not None]
+    
+            # Ensure lists are not empty and have matching lengths before stacking
+            if not final_pixel_values or not final_input_ids_2 or len(final_pixel_values) != len(final_input_ids_2):
+                 logger.error(f"Mismatch in prepared tensor lists or empty lists after handling nesting/errors. "
+                              f"PixelValues count: {len(final_pixel_values)}, InputIDs2 count: {len(final_input_ids_2)}. Cannot stack.")
+                 return None # Signal error
+    
+            pixel_values = torch.stack(final_pixel_values)
+            input_ids_2 = torch.stack(final_input_ids_2)
+            logger.debug("Stacking successful.")
     
             # Assuming text_ids might not always be present or needed (e.g., image-only fine-tuning)
             # Handle potential KeyError if 'text_ids' wasn't generated or kept
             text_ids = None
-            if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
-                # Check if text_ids is also nested (assuming similar potential issue)
-                if isinstance(valid_examples[0]["text_ids"], list):
-                    logger.warning("Collate - text_ids appears nested, attempting to stack element 0.")
-                    # Adjust if the nesting structure is different.
-                    text_ids = torch.stack([example["text_ids"][0] for example in valid_examples])
-                else:
-                    text_ids = torch.stack([example["text_ids"] for example in valid_examples])
+            if "text_ids" in valid_examples[0] and valid_examples[0].get("text_ids") is not None:
+                text_ids_to_stack = []
+                logger.debug("Attempting to stack text_ids, handling potential nesting...")
+                for ex in valid_examples:
+                    tid = ex.get("text_ids")
+                    # Check if this example's tensors were valid in the previous steps
+                    pv = ex.get("pixel_values")
+                    ids2 = ex.get("input_ids_2")
+                    is_pv_valid = isinstance(pv, list) and len(pv) > 0 and isinstance(pv[0], torch.Tensor) or isinstance(pv, torch.Tensor)
+                    is_ids2_valid = isinstance(ids2, list) and len(ids2) > 0 and isinstance(ids2[0], torch.Tensor) or isinstance(ids2, torch.Tensor)
+    
+                    if not is_pv_valid or not is_ids2_valid:
+                        # Skip text_id if the corresponding image/ids2 was invalid
+                        continue
+    
+                    if isinstance(tid, list) and len(tid) > 0:
+                        text_ids_to_stack.append(tid[0])
+                    elif isinstance(tid, torch.Tensor):
+                        text_ids_to_stack.append(tid)
+                    elif tid is None:
+                         # This might happen if text_ids are optional per example
+                         # We need a consistent way to handle this - skip or add placeholder?
+                         # If skipping, ensure lengths match pixel_values/input_ids_2 lengths
+                         logger.debug("Found None text_ids for a valid example, skipping its text_id.")
+                         # This might lead to length mismatch if not handled carefully.
+                         # Let's assume for now text_ids must be present for all *valid* examples if the column exists.
+                         # If optionality per item is needed, logic needs adjustment.
+                         pass # Or potentially add a placeholder if required and handle later
+                    else:
+                         logger.error(f"Unexpected type for text_ids during stacking: {type(tid)}")
+                         # Decide how to handle - skip? placeholder? error?
+    
+                # Stack only if the list is non-empty and matches the length of other stacked tensors
+                if text_ids_to_stack and len(text_ids_to_stack) == len(pixel_values):
+                    text_ids = torch.stack(text_ids_to_stack)
+                    logger.debug("text_ids stacking successful.")
+                elif "text_ids" in valid_examples[0]: # Only log warning if text_ids were expected
+                    logger.warning(f"Could not stack text_ids. Count after processing: {len(text_ids_to_stack)}, "
+                                   f"Expected count: {len(pixel_values)}")
     
             batch = {
                 "pixel_values": pixel_values,
@@ -691,8 +761,12 @@ def main(args):
                 pv = example.get('pixel_values')
                 i2 = example.get('input_ids_2')
                 # Include type info in error log for non-tensors
-                pv_info = f"shape={pv.shape}, dtype={pv.dtype}" if isinstance(pv, torch.Tensor) else f"Not Tensor (type: {type(pv)})"
-                i2_info = f"shape={i2.shape}, dtype={i2.dtype}" if isinstance(i2, torch.Tensor) else f"Not Tensor (type: {type(i2)})"
+                pv_info = f"shape={getattr(pv, 'shape', 'N/A')}, dtype={getattr(pv, 'dtype', 'N/A')}" if isinstance(pv, torch.Tensor) else f"Not Tensor (type: {type(pv)})"
+                if isinstance(pv, list) and len(pv) > 0:
+                    pv_info += f", element[0] type={type(pv[0])}, shape={getattr(pv[0], 'shape', 'N/A')}"
+                i2_info = f"shape={getattr(i2, 'shape', 'N/A')}, dtype={getattr(i2, 'dtype', 'N/A')}" if isinstance(i2, torch.Tensor) else f"Not Tensor (type: {type(i2)})"
+                if isinstance(i2, list) and len(i2) > 0:
+                    i2_info += f", element[0] type={type(i2[0])}, shape={getattr(i2[0], 'shape', 'N/A')}"
                 logger.error(f"  Example {i} info - pixel_values: {pv_info}, input_ids_2: {i2_info}")
     
             # Propagate the error or return a special value
