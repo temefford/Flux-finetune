@@ -30,17 +30,23 @@ import traceback
 ###############################################################################
 # helper: build txt-position ids that have the same width as img_ids
 ###############################################################################
-def make_img_ids(h, w, device):
-    # (H*W, 3) with (z,y,x)
-    y, x = torch.meshgrid(torch.arange(h, device=device),
-                          torch.arange(w, device=device), indexing="ij")
+def make_img_ids(b: int, h: int, w: int, device):
+    """(B, H*W, 3)"""
+    y, x = torch.meshgrid(
+        torch.arange(h, device=device),
+        torch.arange(w, device=device),
+        indexing="ij",
+    )
     z = torch.zeros_like(y)
-    return torch.stack((z, y, x), dim=-1).view(-1, 3)
+    grid = torch.stack((z, y, x), dim=-1).view(1, -1, 3)   # (1, H*W, 3)
+    return grid.repeat(b, 1, 1)                            # (B, H*W, 3)
 
-def make_txt_ids(seq_len, device):
-    # (T, 3) with (z,y,x) where y=z=0
+def make_txt_ids(seq_len: int, device):
+    """(1, T, 3) — the batch dimension is kept at 1 on purpose;  
+       transformer_flux expands it to (B,T,3) internally."""
     x = torch.arange(seq_len, device=device)
-    return torch.stack((torch.zeros_like(x), torch.zeros_like(x), x), dim=-1)
+    txt = torch.stack((torch.zeros_like(x), torch.zeros_like(x), x), dim=-1)
+    return txt.unsqueeze(0)  
 
 
 # --- Argument Parsing ---
@@ -893,12 +899,13 @@ def main(args):
 
                 # Reshape latents for transformer: (B, C, H, W) -> (B, H*W, C)
                 bsz, channels, height, width = latents.shape # Use bsz here, batch_size might be different due to accumulation
+                bsz = pixel_values.size(0)
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
-                img_ids = make_img_ids(height, width, latents.device)
-                txt_ids = make_txt_ids(prompt_embeds_2.shape[1], latents.device)
+                img_ids = make_img_ids(bsz, height, width, latents.device)   # (B, H*W, 3)
+                txt_ids = make_txt_ids(prompt_embeds_2.size(1), latents.device)  # (1, T, 3)
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
