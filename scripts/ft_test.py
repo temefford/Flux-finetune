@@ -314,23 +314,35 @@ def main(args):
     # Calculate absolute dataset path relative to the script's location
     script_dir = os.path.dirname(__file__)
     dataset_abs_path = os.path.abspath(os.path.join(script_dir, args.dataset_path))
-    metadata_file = os.path.join(dataset_abs_path, "metadata.json") # Use absolute path for metadata too
-    logger.info(f"Attempting to load dataset metadata from: {metadata_file}")
+    logger.info(f"Loading dataset. Type: {args.dataset_type}, Path: {dataset_abs_path}")
 
-    if not os.path.exists(metadata_file):
-        logger.error(f"Metadata file not found at {metadata_file}")
-        logger.error("Ensure 'metadata.json' exists in the specified dataset_path.")
-        return
-
-    try:
-        # Load as standard JSON (list of dicts at root)
-        dataset = load_dataset("json", data_files=metadata_file, split="train") # Removed field="data"
+    # --- Load based on type ---
+    if args.dataset_type == "imagefolder":
+        dataset = datasets.load_dataset(
+            "imagefolder",
+            data_dir=dataset_abs_path,
+            split="train",
+        )
         logger.info(f"Loaded dataset with {len(dataset)} examples.")
-    except Exception as e:
-        logger.error(f"Failed to load dataset from {metadata_file}: {e}")
-        logger.error("Ensure 'metadata.json' exists and is formatted correctly (JSON array of objects with 'file_name' and 'text').")
-        logger.error("Alternatively, modify the 'load_dataset' call for your structure.")
-        return
+    elif args.dataset_type == "hf_metadata":
+        metadata_path = os.path.join(dataset_abs_path, "metadata.json")
+        logger.info(f"Checking for metadata file for 'hf_metadata' type: {metadata_path}")
+        if not os.path.exists(metadata_path):
+            logger.error(f"Metadata file absolutely required but not found at {metadata_path}")
+            logger.error("Exiting. Ensure 'metadata.json' exists in the specified dataset_path for 'hf_metadata' type.")
+            return # Stop execution
+        logger.info("Metadata file found, proceeding with loading.")
+        # Load using metadata.json
+        try:
+            dataset = load_dataset("json", data_files=metadata_path, split="train") # Removed field="data"
+            logger.info(f"Loaded dataset with {len(dataset)} examples.")
+        except Exception as e:
+            logger.error(f"Failed to load dataset from {metadata_path}: {e}")
+            logger.error("Ensure 'metadata.json' exists and is formatted correctly (JSON array of objects with 'file_name' and 'text').")
+            logger.error("Alternatively, modify the 'load_dataset' call for your structure.")
+            return
+    else:
+        raise ValueError("Unsupported dataset type. Please use 'imagefolder' or 'hf_metadata'.")
 
     # --- Split Dataset --- #
     if args.val_split > 0.0:
