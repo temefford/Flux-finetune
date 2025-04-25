@@ -133,7 +133,7 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
         images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
 
         # Apply transforms - result is a list of tensors
-        pixel_values_list = [image_transforms(image) for image in images]
+        pixel_values_list = [image_transforms(image)[0] for image in images]
 
         # Tokenize captions
         captions = list(examples[caption_column])
@@ -184,7 +184,7 @@ def preprocess_func(examples, **fn_kwargs):
         images = [image.convert("RGB") for image in examples[args.image_column]]
 
         # Apply transforms - result is a list of tensors
-        pixel_values_list = [image_transforms(image) for image in images]
+        pixel_values_list = [image_transforms(image)[0] for image in images]
 
         # Tokenize captions
         captions = list(examples[args.caption_column])
