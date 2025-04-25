@@ -162,8 +162,14 @@ def preprocess_train(examples, dataset_abs_path, image_transforms, image_column,
     except FileNotFoundError as e:
         logger.error(f"Error opening image file: {e}. Returning None for batch.")
         return {"pixel_values": None, "input_ids_2": None}
+    except IndexError as ie:
+        logger.error(f"IndexError during preprocessing batch: {ie}. This might indicate an issue with tensor dimensions during image/text processing. Returning None for batch.")
+        # Optionally log shapes if variables are accessible
+        # logger.error(f" Pixel values shape: {pixel_values_batch_tensor.shape if 'pixel_values_batch_tensor' in locals() else 'N/A'}")
+        # logger.error(f" Input IDs shape: {input_ids_2_batch_tensor.shape if 'input_ids_2_batch_tensor' in locals() else 'N/A'}")
+        return {"pixel_values": None, "input_ids_2": None}
     except Exception as e:
-        logger.error(f"Error during preprocessing batch: {e}. Returning None for batch.")
+        logger.error(f"General error during preprocessing batch: {e}. Returning None for batch.")
         return {"pixel_values": None, "input_ids_2": None}
 
 def preprocess_imagefolder(examples, image_transforms, image_column):
