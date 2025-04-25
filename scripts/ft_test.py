@@ -153,9 +153,9 @@ def tokenize_captions(tokenizer, examples, text_column="text"):
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, tokenizer_2):
     """Preprocesses a batch of training examples."""
     try:
-        image_dir = os.path.join(dataset_abs_path, "imgs")
         # Append .jpg to the hash value retrieved using image_column
-        images = [Image.open(os.path.join(image_dir, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
+        # Use dataset_abs_path directly since images are not in 'imgs' subdir
+        images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
         examples["pixel_values"] = [image_transforms(image) for image in images]
         
         # Tokenize hash column using tokenizer_2
