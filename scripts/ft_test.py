@@ -123,7 +123,7 @@ def parse_args():
 
     # Add other defaults if missing from config or command line
     args.config_path = cmd_args.config # Store the actual config path used
-    args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
+    args.validation_batch_size = getattr(args, 'validation_batch_size', args.train_batch_size)
     args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 0)
     # Ensure validation_split has a default value if not set anywhere
     if not hasattr(args, 'validation_split'):
