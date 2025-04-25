@@ -905,6 +905,10 @@ def main(args):
             val_loss = 0.0
             val_steps = 0
             for step, val_batch in enumerate(tqdm(val_dataloader, desc="Validation", disable=not accelerator.is_local_main_process)):
+                if val_batch is None:
+                    logger.warning(f"Skipping validation batch {step} due to collation error.")
+                    continue
+
                 with torch.no_grad():
                     # Prepare inputs for validation (similar to training)
                     # Ensure pixel_values are on the correct device and dtype
