@@ -706,6 +706,14 @@ def main(args):
                 latents_reshaped = latents.permute(0, 2, 3, 1).reshape(bsz, height * width, channels)
                 logger.debug(f"Shape AFTER reshape (Input to transformer) - latents_reshaped: {latents_reshaped.shape}")
 
+                # Generate correct 2D img_ids
+                seq_len = height * width
+                row_ids = torch.arange(height, device=latents.device)
+                col_ids = torch.arange(width, device=latents.device)
+                grid_coords = torch.stack(torch.meshgrid(row_ids, col_ids, indexing="ij"), dim=-1).reshape(seq_len, 2)
+                img_ids = grid_coords.unsqueeze(0).repeat(bsz, 1, 1) # Add batch dimension
+                logger.debug(f"Generated 2D img_ids shape: {img_ids.shape}")
+
                 # Create placeholder T5 IDs matching img_ids seq_len as a workaround for concat error
                 input_ids_2 = torch.zeros(bsz, latents_reshaped.shape[1], dtype=torch.long, device=accelerator.device)
                 logger.debug(f"Using placeholder txt_ids matching img_ids seq_len: {input_ids_2.shape}")
@@ -739,6 +747,7 @@ def main(args):
                 logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled.shape}")
                 logger.debug(f"  transformer input type - txt_ids: {type(input_ids_2)}")
                 logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape if input_ids_2 is not None else 'None'}")
+                logger.debug(f"  transformer input shape - img_ids: {img_ids.shape}")
 
                 model_pred = transformer(
                     hidden_states=noisy_latents,
@@ -746,6 +755,7 @@ def main(args):
                     encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
                     pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
                     txt_ids=input_ids_2, # T5 IDs (None for img-only)
+                    img_ids=img_ids,     # Pass generated 2D spatial IDs
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -863,6 +873,14 @@ def main(args):
                         prompt_embeds_2_outputs = text_encoder_2(input_ids_2, output_hidden_states=True)
                         prompt_embeds_2 = prompt_embeds_2_outputs.last_hidden_state
 
+                    # Generate correct 2D img_ids for validation
+                    seq_len_val = height_val * width_val
+                    row_ids_val = torch.arange(height_val, device=latents.device)
+                    col_ids_val = torch.arange(width_val, device=latents.device)
+                    grid_coords_val = torch.stack(torch.meshgrid(row_ids_val, col_ids_val, indexing="ij"), dim=-1).reshape(seq_len_val, 2)
+                    img_ids_val = grid_coords_val.unsqueeze(0).repeat(bsz_val, 1, 1)
+                    logger.debug(f"Generated validation 2D img_ids shape: {img_ids_val.shape}")
+
                     # Sample noise and timesteps for validation
                     noise = torch.randn_like(latents_reshaped_val)
                     bsz = latents.shape[0]
@@ -875,6 +893,7 @@ def main(args):
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
                         txt_ids=input_ids_2, # Re-added T5 token IDs
+                        img_ids=img_ids_val, # Use pre-generated validation ids
                     ).sample
 
                     # Assume target is noise for validation loss calculation
@@ -975,15 +994,14 @@ def main(args):
     total_duration = end_time - training_start_time
     logger.info(f"Training finished in {total_duration:.2f} seconds.")
 
-def log_transformer_inputs(logger, hidden_states, timestep, encoder_hidden_states, pooled_projections, txt_ids, prefix="Training"):
+def log_transformer_inputs(logger, hidden_states, timestep, encoder_hidden_states, pooled_projections, txt_ids, img_ids, prefix="Training"):
     logger.debug(f"--- {prefix} Transformer Inputs ---")
     logger.debug(f"  hidden_states shape: {hidden_states.shape}")
     logger.debug(f"  timestep shape: {timestep.shape}")
-    logger.debug(f"  encoder_hidden_states type: {type(encoder_hidden_states)}")
-    logger.debug(f"  encoder_hidden_states shape: {encoder_hidden_states.shape if encoder_hidden_states is not None else 'None'}")
     logger.debug(f"  pooled_projections shape: {pooled_projections.shape}")
     logger.debug(f"  txt_ids type: {type(txt_ids)}")
     logger.debug(f"  txt_ids shape: {txt_ids.shape if txt_ids is not None else 'None'}")
+    logger.debug(f"  img_ids shape: {img_ids.shape}")
 
 if __name__ == "__main__":
     # Configuration loading and argument parsing are now handled within parse_args
