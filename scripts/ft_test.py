@@ -82,7 +82,8 @@ def parse_args():
         if hasattr(final_args, k): # Only update if it's a known argument
             setattr(final_args, k, v)
         else:
-            logger.warning(f"Ignoring unknown argument '{k}' from config file '{cmd_args.config}'")
+            # Use print for warnings during arg parsing before logger is ready
+            print(f"WARNING: Ignoring unknown argument '{k}' from config file '{cmd_args.config}'")
 
     # 3. Update with command line arguments (highest priority)
     # Iterate through args defined in the parser to only consider known args
