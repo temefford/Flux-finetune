@@ -127,31 +127,42 @@ def tokenize_captions(captions, tokenizer):
         raise e # Re-raise for now
 
 def preprocess_train(examples, dataset_abs_path, image_transforms, image_column, hash_column, caption_column, tokenizer_2):
-    """Preprocesses a batch of training examples."""
+    """Preprocesses a batch of training examples for datasets.map."""
     try:
-        # Append .jpg to the hash value retrieved using image_column
-        # Use dataset_abs_path directly since images are not in 'imgs' subdir
+        # Load images
         images = [Image.open(os.path.join(dataset_abs_path, f"{fn}.jpg")).convert("RGB") for fn in examples[image_column]]
-        examples["pixel_values"] = [image_transforms(image) for image in images]
-        
-        # Tokenize caption column using tokenizer_2
-        captions = list(examples[caption_column]) # Use caption_column
-        # Ensure captions are strings
-        captions = [str(c) if c is not None else "" for c in captions] # Handle potential None captions
-        logger.debug(f"Tokenizing captions (first 5): {captions[:5]}")
-        text_inputs_2 = tokenize_captions(captions, tokenizer_2) # Pass captions, use tokenizer_2
-        examples["input_ids_2"] = text_inputs_2
+        # Apply transforms - result is a list of tensors
+        pixel_values_list = [image_transforms(image) for image in images]
+
+        # Tokenize captions
+        captions = list(examples[caption_column])
+        captions = [str(c) if c is not None else "" for c in captions]
+        # tokenize_captions returns a tensor [batch, seq_len]
+        text_inputs_2_tensor = tokenize_captions(captions, tokenizer_2)
+
+        # Return a dictionary where values are lists matching the batch size
+        return {
+            "pixel_values": pixel_values_list,
+            "input_ids_2": text_inputs_2_tensor.tolist() # Convert tensor to list of lists
+        }
+
     except FileNotFoundError as e:
         logger.error(f"Error opening image: {e}. Check dataset_path and file names.")
-        # Decide how to handle: skip batch, raise error, etc.
-        # For now, let's add a placeholder or skip - adding None might cause issues later
-        # Safest might be to ensure paths are correct before this step.
-        # Re-raising for now to make the error visible.
-        raise e
+        # Return empty structure or raise, depending on desired robustness
+        # Returning structure matching keys might prevent some errors downstream
+        batch_size = len(examples[image_column]) # Determine batch size from input
+        return {
+            "pixel_values": [None] * batch_size,
+            "input_ids_2": [None] * batch_size,
+        }
     except Exception as e:
         logger.error(f"Error during image preprocessing: {e}")
-        raise e
-    return examples
+        # Similar error handling as above
+        batch_size = len(examples[image_column])
+        return {
+            "pixel_values": [None] * batch_size,
+            "input_ids_2": [None] * batch_size,
+        }
 
 # --- Preprocessing Function --- #
 def preprocess_func(examples, **fn_kwargs):
@@ -181,37 +192,18 @@ def preprocess_func(examples, **fn_kwargs):
 
     # 2. Tokenize Captions (Handle 'imagefolder' case)
     if args.dataset_type == "imagefolder":
-        # Generate dummy captions and add them directly to the examples dict
-        num_examples = len(images) # Use length of successfully loaded images
-        examples[args.caption_column] = ["" for _ in range(num_examples)] # Add dummy captions under the expected key
-        # Now call tokenize_captions with the modified examples dict
-        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
-    elif args.dataset_type == "hf_metadata": # Assuming hf_metadata has the caption column
-        # Check if caption column exists before accessing
-        if args.caption_column not in examples:
-            logger.error(f"Caption column '{args.caption_column}' not found in 'hf_metadata' dataset example.")
-            logger.error(f"Available columns: {list(examples.keys())}")
-            # Decide how to handle: raise error, skip example, use empty caption?
-            raise KeyError(f"Caption column '{args.caption_column}' missing for hf_metadata.")
-        captions = tokenize_captions((tokenizer, tokenizer_2), examples, text_column=args.caption_column)
+        # Image-only: Set text inputs to None
+        logger.debug("Image-only batch detected. Using None for text inputs.")
     else:
-        # Should not happen if initial loading logic is correct, but good to handle
-        logger.error(f"Preprocessing encountered unexpected dataset type: {args.dataset_type}")
-        # Fallback or raise error
-        raise ValueError(f"Unsupported dataset type in preprocess_func: {args.dataset_type}")
-
-    # 3. VAE Encoding (if not done in training loop)
-    # Moved VAE encoding to the training loop for efficiency
-    # latents = vae.encode(pixel_values.to(accelerator.device, dtype=weight_dtype)).latent_dist.sample()
-    # latents = latents * vae.config.scaling_factor
+        # Multimodal: Get text inputs from batch and encode
+        input_ids_2_batch = examples[args.caption_column]
+        captions = tokenize_captions(input_ids_2_batch, tokenizer_2)
+        captions = captions["input_ids"]
 
     # Return processed data
     return {
         "pixel_values": pixel_values,
-        "input_ids": captions["input_ids"],
-        "input_ids_2": captions["input_ids_2"],
-        "attention_mask": captions["attention_mask"],
-        "attention_mask_2": captions["attention_mask_2"],
+        "input_ids_2": captions, # Return only the input_ids
     }
 
 # --- Main Function ---
@@ -476,9 +468,8 @@ def main(args):
         pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
         # Ensure input_ids_2 are correctly handled
-        # The preprocess_train function returns tensors for input_ids_2
-        # so we don't need torch.tensor() here.
-        input_ids_2 = torch.stack([example["input_ids_2"] for example in examples])
+        # preprocess_train returns a list of lists; convert each list back to a tensor
+        input_ids_2 = torch.stack([torch.tensor(example["input_ids_2"]) for example in examples])
 
         return {
             "pixel_values": pixel_values,
