@@ -643,7 +643,6 @@ def main(args):
                     pooled_projections=clip_pooled.to(accelerator.device),
                     txt_ids=input_ids_2.to(accelerator.device),
                     img_ids=None,
-                    img_pooled=None,
                 ).sample
 
                 # Assume prediction target is the noise (epsilon prediction)
@@ -768,7 +767,6 @@ def main(args):
                         pooled_projections=clip_pooled.to(accelerator.device),
                         txt_ids=val_batch["input_ids_2"].to(accelerator.device),
                         img_ids=None,
-                        img_pooled=None,
                     ).sample
 
                     # Assume target is noise for validation loss calculation
