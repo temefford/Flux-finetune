@@ -684,22 +684,67 @@ def main(args):
                 clip_embed_dim = text_encoder.config.projection_dim   # e.g., 1280
                 null_sequence_length = 1 # Define a minimal length for null sequences
 
-                # Cast text inputs if they exist
-                if batch_prompt_embeds_2 is not None:
-                    batch_prompt_embeds_2 = batch_prompt_embeds_2.to(dtype=weight_dtype)
-                if batch_clip_pooled is not None:
-                    batch_clip_pooled = batch_clip_pooled.to(dtype=weight_dtype)
-                if batch_input_ids_2 is not None:
-                    batch_input_ids_2 = batch_input_ids_2.long() # Ensure Long type for IDs
+                # Create null T5 embeddings if needed
+                if batch_prompt_embeds_2 is None:
+                    null_t5_embeds = torch.zeros(
+                        bsz, null_sequence_length, t5_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    prompt_embeds_2 = null_t5_embeds
+                    logger.debug(f"Created null T5 embeds: {prompt_embeds_2.shape}")
+                else:
+                    prompt_embeds_2 = batch_prompt_embeds_2
+
+                # Create null CLIP pooled projections if needed
+                if batch_clip_pooled is None:
+                    null_clip_pooled = torch.zeros(
+                        bsz, clip_embed_dim,
+                        dtype=weight_dtype, device=accelerator.device
+                    )
+                    clip_pooled = null_clip_pooled
+                    logger.debug(f"Created null CLIP pooled embeds: {clip_pooled.shape}")
+                else:
+                    clip_pooled = batch_clip_pooled
+
+                # Create null T5 input IDs if needed
+                if batch_input_ids_2 is None:
+                    t5_pad_token_id = tokenizer_2.pad_token_id if hasattr(tokenizer_2, 'pad_token_id') else 0
+                    null_t5_ids = torch.full(
+                        (bsz, null_sequence_length),
+                        fill_value=t5_pad_token_id,
+                        dtype=torch.long, device=accelerator.device
+                    )
+                    input_ids_2 = null_t5_ids
+                    logger.debug(f"Created null T5 input IDs: {input_ids_2.shape}")
+                else:
+                    input_ids_2 = batch_input_ids_2
+                # --- End Unconditional Handling --- #
+
+                # Log shapes before transformer call (using prepared variables)
+                logger.debug(f"Shape BEFORE transformer call - noisy_latents: {noisy_latents.shape}")
+                logger.debug(f"Shape BEFORE transformer call - timesteps: {timesteps.shape}")
+                if prompt_embeds_2 is not None:
+                    logger.debug(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): {prompt_embeds_2.shape}")
+                else:
+                    logger.debug(f"Shape BEFORE transformer call - prompt_embeds_2 (T5): None")
+                if clip_pooled is not None:
+                    logger.debug(f"Shape BEFORE transformer call - pooled_projections (CLIP): {clip_pooled.shape}")
+                else:
+                    logger.debug("Shape BEFORE transformer call - pooled_projections (CLIP): None") # Should have placeholder if img-only
+                if input_ids_2 is not None:
+                    logger.debug(f"Shape BEFORE transformer call - txt_ids (T5): {input_ids_2.shape}")
+                else:
+                     logger.debug(f"Shape BEFORE transformer call - txt_ids (T5): None")
+                logger.debug(f"Shape BEFORE transformer call - img_ids: {img_ids.shape}")
 
                 # Predict the noise residual using the transformer model
                 # Pass the prepared conditional inputs (which might be None for text)
                 model_pred = transformer(
                     hidden_states=noisy_latents,
                     timestep=timesteps,
-                    encoder_hidden_states=batch_prompt_embeds_2, # T5 sequence embeds (None for img-only)
-                    pooled_projections=batch_clip_pooled, # CLIP pooled embeds (placeholder for img-only)
-                    txt_ids=batch_input_ids_2, # T5 IDs (None for img-only)
+                    encoder_hidden_states=prompt_embeds_2, # T5 sequence embeds (None for img-only)
+                    pooled_projections=clip_pooled, # CLIP pooled embeds (placeholder for img-only)
+                    txt_ids=input_ids_2, # T5 IDs (None for img-only)
                     img_ids=img_ids,
                 ).sample
 
@@ -742,8 +787,10 @@ def main(args):
                             # Use the save_pretrained method from the PeftModel instance
                             unwrapped_transformer.save_pretrained(save_path)
                         else:
-                            # Fallback or add specific logic if using a custom model structure
-                            torch.save(unwrapped_transformer.state_dict(), os.path.join(save_path, "pytorch_model.bin"))
+                            # Fallback if not a PeftModel (shouldn't happen with LoRA but good practice)
+                            logger.warning("Attempting to save LoRA checkpoint, but model is not a PeftModel.")
+                            # Optionally save the full state dict if needed
+                            # torch.save(unwrapped_transformer.state_dict(), os.path.join(save_path, "pytorch_model.bin"))
                         logger.info(f"Saved state and LoRA weights to {save_path}")
 
             logs = {"step_loss": loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
