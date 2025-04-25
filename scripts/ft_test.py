@@ -645,7 +645,7 @@ def main(args):
                     latents_reshaped,
                     timestep=timesteps,
                     encoder_hidden_states=prompt_embeds_2,
-                    txt_ids=input_ids_2,
+                    pooled_prompt_embeds=clip_pooled, # Try this name for CLIP pooled embeds
                     img_ids=img_ids,
                 ).sample
 
@@ -745,6 +745,11 @@ def main(args):
                     latents_reshaped_val = latents.permute(0, 2, 3, 1).reshape(bsz_val, height_val * width_val, channels_val)
                     logger.debug(f"Validation shape after reshape: {latents_reshaped_val.shape}")
 
+                    # Generate img_ids for validation
+                    bsz_val = latents_reshaped_val.shape[0]
+                    seq_len_val = latents_reshaped_val.shape[1]
+                    img_ids_val = torch.arange(seq_len_val, device=latents.device).repeat(bsz_val, 1)
+
                     # Encode prompts for validation batch
                     with torch.no_grad():
                         # CLIP Embeddings
@@ -767,7 +772,8 @@ def main(args):
                         latents_reshaped_val,
                         timestep=timesteps,
                         encoder_hidden_states=prompt_embeds_2,
-                        txt_ids=val_batch["input_ids_2"],
+                        pooled_prompt_embeds=clip_pooled, # Use same name here
+                        img_ids=img_ids_val, # Use pre-generated ids
                     ).sample
 
                     # Assume target is noise for validation loss calculation
