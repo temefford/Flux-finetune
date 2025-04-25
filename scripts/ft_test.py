@@ -610,82 +610,95 @@ def main(args):
     # --- Create DataLoader --- #
     logger.info("Creating DataLoader...")
 
-    # Collate function (Revert to simplest form)
-    def collate_fn(examples):
-        """Collates preprocessed examples into batches, filtering out invalid entries."""
-        # Filter out entries where pixel_values is None (indicating a preprocessing failure for that example)
-        valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
+# Collate function
+def collate_fn(examples):
+    """Collates preprocessed examples into batches, filtering out invalid entries."""
+    # Filter out entries where pixel_values is None (indicating a preprocessing failure for that example)
+    original_count = len(examples)
+    valid_examples = [ex for ex in examples if ex.get("pixel_values") is not None and ex.get("input_ids_2") is not None]
+    filtered_count = len(valid_examples)
+    logger.debug(f"Collate - Processing {filtered_count} valid examples out of {original_count} original.")
 
-        if not valid_examples:
-            logger.warning("Collate function received batch with no valid examples after filtering Nones. Skipping batch.")
-            # Return an empty dictionary or None to signal skipping this batch in the training loop
-            return None
+    if not valid_examples:
+        logger.warning("Collate - No valid examples in this batch after filtering.")
+        return None
 
-        # Log details of valid examples before stacking
-        logger.debug(f"Collate - Processing {len(valid_examples)} valid examples out of {len(examples)} original.")
+    for i, example in enumerate(valid_examples):
+        pv = example.get('pixel_values')
+        ids2 = example.get('input_ids_2')
+        pv_type = type(pv)
+        ids2_type = type(ids2)
+        # Log shapes only if they are tensors
+        pv_shape = getattr(pv, 'shape', 'N/A') if isinstance(pv, torch.Tensor) else 'N/A'
+        ids2_shape = getattr(ids2, 'shape', 'N/A') if isinstance(ids2, torch.Tensor) else 'N/A'
+        logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
+
+    # === Detailed logging for the first valid example ===
+    first_example = valid_examples[0]
+    first_pv = first_example.get('pixel_values')
+    logger.debug(f"Collate - First valid example pixel_values type: {type(first_pv)}")
+    if isinstance(first_pv, list):
+        logger.debug(f"Collate - First valid example pixel_values is a list. Length: {len(first_pv)}")
+        if len(first_pv) > 0:
+            first_pv_elem0 = first_pv[0]
+            logger.debug(f"Collate - First valid example pixel_values[0] type: {type(first_pv_elem0)}")
+            if isinstance(first_pv_elem0, torch.Tensor):
+                logger.debug(f"Collate - First valid example pixel_values[0] shape: {first_pv_elem0.shape}")
+            elif isinstance(first_pv_elem0, list):
+                 logger.debug(f"Collate - First valid example pixel_values[0] is also a list! Length: {len(first_pv_elem0)}")
+    # =======================================================
+
+    try:
+        # Log type of the first element we plan to stack
+        if valid_examples:
+            first_pv_to_stack = valid_examples[0].get("pixel_values")
+            first_i2_to_stack = valid_examples[0].get("input_ids_2")
+            logger.debug(f"Collate - Attempting to stack. First pixel_values type: {type(first_pv_to_stack)}")
+            if isinstance(first_pv_to_stack, torch.Tensor):
+                 logger.debug(f"Collate - First pixel_values shape: {first_pv_to_stack.shape}")
+            logger.debug(f"Collate - Attempting to stack. First input_ids_2 type: {type(first_i2_to_stack)}")
+            if isinstance(first_i2_to_stack, torch.Tensor):
+                 logger.debug(f"Collate - First input_ids_2 shape: {first_i2_to_stack.shape}")
+
+        # Stack directly assuming example["pixel_values"] / example["input_ids_2"] is the tensor
+        pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
+        input_ids_2 = torch.stack([example["input_ids_2"] for example in valid_examples])
+
+        # Assuming text_ids might not always be present or needed (e.g., image-only fine-tuning)
+        # Handle potential KeyError if 'text_ids' wasn't generated or kept
+        text_ids = None
+        if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
+            # Check if text_ids is also nested (assuming similar potential issue)
+            if isinstance(valid_examples[0]["text_ids"], list):
+                logger.warning("Collate - text_ids appears nested, attempting to stack element 0.")
+                # Adjust if the nesting structure is different.
+                text_ids = torch.stack([example["text_ids"][0] for example in valid_examples])
+            else:
+                 text_ids = torch.stack([example["text_ids"] for example in valid_examples])
+
+        batch = {
+            "pixel_values": pixel_values,
+            "input_ids_2": input_ids_2,
+        }
+        if text_ids is not None:
+            batch["text_ids"] = text_ids
+
+        return batch
+
+    except (TypeError, IndexError) as e:
+        logger.error(f"Error during collate_fn stacking: {e}")
+        # Log shapes/types for debugging
         for i, example in enumerate(valid_examples):
-            pv = example.get("pixel_values")
-            ids2 = example.get("input_ids_2")
-            pv_type = type(pv).__name__
-            ids2_type = type(ids2).__name__
-            # Use getattr to safely get shape, defaulting to 'N/A' if not a tensor
-            pv_shape = getattr(pv, 'shape', 'N/A')
-            ids2_shape = getattr(ids2, 'shape', 'N/A')
-            logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
+            pv = example.get('pixel_values')
+            i2 = example.get('input_ids_2')
+            # Include type info in error log for non-tensors
+            pv_info = f"shape={pv.shape}, dtype={pv.dtype}" if isinstance(pv, torch.Tensor) else f"Not Tensor (type: {type(pv)})"
+            i2_info = f"shape={i2.shape}, dtype={i2.dtype}" if isinstance(i2, torch.Tensor) else f"Not Tensor (type: {type(i2)})"
+            logger.error(f"  Example {i} info - pixel_values: {pv_info}, input_ids_2: {i2_info}")
 
-        # === Add detailed logging for the first valid example ===
-        first_example = valid_examples[0]
-        first_pv = first_example.get('pixel_values')
-        logger.debug(f"Collate - First valid example pixel_values type: {type(first_pv)}")
-        if isinstance(first_pv, list):
-            logger.debug(f"Collate - First valid example pixel_values is a list. Length: {len(first_pv)}")
-            if len(first_pv) > 0:
-                first_pv_elem0 = first_pv[0]
-                logger.debug(f"Collate - First valid example pixel_values[0] type: {type(first_pv_elem0)}")
-                if isinstance(first_pv_elem0, torch.Tensor):
-                    logger.debug(f"Collate - First valid example pixel_values[0] shape: {first_pv_elem0.shape}")
-                elif isinstance(first_pv_elem0, list):
-                     logger.debug(f"Collate - First valid example pixel_values[0] is also a list! Length: {len(first_pv_elem0)}")
-        # ========================================================
-
-        try:
-            # Extract tensors correctly based on the actual structure
-            # Assuming the previous hypothesis: example['pixel_values'] is like [tensor]
-            pixel_values = torch.stack([example["pixel_values"][0] for example in valid_examples])
-            input_ids_2 = torch.stack([example["input_ids_2"][0] for example in valid_examples])
-
-            # Assuming text_ids might not always be present or needed (e.g., image-only fine-tuning)
-            # Handle potential KeyError if 'text_ids' wasn't generated or kept
-            text_ids = None
-            if "text_ids" in valid_examples[0] and valid_examples[0]["text_ids"] is not None:
-                # Check if text_ids is also nested
-                if isinstance(valid_examples[0]["text_ids"], list):
-                     text_ids = torch.stack([example["text_ids"][0] for example in valid_examples])
-                else:
-                     text_ids = torch.stack([example["text_ids"] for example in valid_examples])
-
-            batch = {
-                "pixel_values": pixel_values,
-                "input_ids_2": input_ids_2,
-            }
-            if text_ids is not None:
-                batch["text_ids"] = text_ids
-
-            return batch
-
-        except (TypeError, IndexError) as e:
-            logger.error(f"Error during collate_fn stacking: {e}")
-            # Log shapes/types for debugging
-            for i, example in enumerate(valid_examples):
-                pv = example.get('pixel_values')
-                i2 = example.get('input_ids_2')
-                pv_info = f"shape={pv.shape}, dtype={pv.dtype}" if isinstance(pv, torch.Tensor) else "Not Tensor"
-                i2_info = f"shape={i2.shape}, dtype={i2.dtype}" if isinstance(i2, torch.Tensor) else "Not Tensor"
-                logger.error(f"  Example {i} shapes - pixel_values: {pv_info}, input_ids_2: {i2_info}")
-
-            # Propagate the error or return a special value
-            # For now, return None to indicate a failed batch collation
-            return None
+        # Propagate the error or return a special value
+        # For now, return None to indicate a failed batch collation
+        return None
 
     train_dataloader = torch.utils.data.DataLoader(
         train_dataset,
@@ -1081,13 +1094,71 @@ def main(args):
                     timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (bsz,), device=latents.device)
                     timesteps = timesteps.long()
 
+                    # Ensure pooled projections exist (create placeholder if needed) -- Moved here AGAIN to prevent logging error
+                    if clip_pooled_device is None:
+                        # Get expected dimension from transformer config
+                        try:
+                            # Try to get the specific dim expected by the text embedder for pooled projections
+                            expected_clip_dim = transformer.config.pooled_projection_dim
+                            if expected_clip_dim is None:
+                                logger.warning("transformer.config.pooled_projection_dim is None, falling back to 768.")
+                                expected_clip_dim = 768 # Fallback (common in some FLUX variants)
+                        except AttributeError:
+                            logger.warning("Could not find transformer.config.pooled_projection_dim, falling back to 768.")
+                            expected_clip_dim = 768 # Fallback
+
+                        clip_pooled_device = torch.zeros(bsz, expected_clip_dim, dtype=weight_dtype, device=accelerator.device)
+                        logger.warning(f"clip_pooled was None immediately before logging/transformer call, created placeholder with expected dim {expected_clip_dim}: {clip_pooled_device.shape}")
+
+                    # Ensure prompt_embeds_2 is a tensor, even for image-only datasets
+                    if prompt_embeds_2_device is None:
+                        cross_attention_dim = getattr(transformer.config, 'cross_attention_dim', None)
+                        if cross_attention_dim is None:
+                            cross_attention_dim = getattr(transformer.config, 'joint_attention_dim', None)
+                        if cross_attention_dim is None:
+                            raise ValueError("Could not determine cross_attention_dim for placeholder prompt_embeds_2.")
+                        # Use seq_len=1 for null prompt
+                        prompt_embeds_2_device = torch.zeros(
+                            bsz, 1, cross_attention_dim,
+                            dtype=weight_dtype, device=accelerator.device
+                        )
+                        logger.warning(f"prompt_embeds_2 was None, created placeholder: {prompt_embeds_2_device.shape}")
+
+                    # Ensure input_ids_2 is None for image-only batches before the call
+                    if input_ids_2_device is None:
+                        # This confirmation might seem redundant if it comes in as None, 
+                        # but ensures it's explicitly None before passing.
+                        input_ids_2 = None 
+                        logger.warning("Confirmed input_ids_2 is None for image-only batch.")
+
+                    # Create null T5 input IDs if still None
+                    if input_ids_2 is None:
+                         input_ids_2 = torch.zeros(
+                             bsz, 1,
+                             dtype=torch.long, device=accelerator.device
+                         )
+                         logger.warning(f"input_ids_2 was None, created minimal placeholder: {input_ids_2.shape}")
+
                     # Predict noise using the model
+                    # Pass the prepared conditional inputs (placeholders or None)
+                    logger.debug(f"  transformer input shape - hidden_states: {latents_reshaped.shape}")
+                    logger.debug(f"  transformer input shape - timestep: {timesteps.shape}") 
+                    logger.debug(f"  transformer input shape - encoder_hidden_states: {prompt_embeds_2_device.shape}") # Placeholder ensured
+                    logger.debug(f"  transformer input shape - pooled_projections: {clip_pooled_device.shape}")       # Placeholder ensured
+                    logger.debug(f"  transformer input shape - img_ids: {img_ids_val.shape}")
+                    # Log txt_ids shape only if it exists 
+                    if input_ids_2 is not None:
+                         logger.debug(f"  transformer input shape - txt_ids: {input_ids_2.shape}")
+                    else:
+                         logger.debug("  transformer input shape - txt_ids: None") # Explicitly logging None
+
+                    # Pass arguments explicitly
                     model_pred_val = transformer(
                         hidden_states=latents_reshaped,
                         timestep=timesteps,
-                        encoder_hidden_states=prompt_embeds_2_device, # T5 sequence embeds (None for img-only)
-                        pooled_projections=clip_pooled_device, # CLIP pooled embeds (placeholder for img-only)
-                        txt_ids=input_ids_2_device, # Pass the variable prepared earlier (None for image-only)
+                        encoder_hidden_states=prompt_embeds_2_device,
+                        pooled_projections=clip_pooled_device,
+                        txt_ids=input_ids_2, # Pass the placeholder tensor
                         img_ids=img_ids_val, # Use corrected 1D validation img_ids
                     ).sample
 
