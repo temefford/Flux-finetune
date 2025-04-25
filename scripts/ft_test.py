@@ -424,13 +424,14 @@ def main(args):
     else:
         raise ValueError("Unsupported dataset type. Please use 'imagefolder' or 'hf_metadata'.")
 
-    # --- Split Dataset --- #
-    if args.val_split > 0.0:
-        if not (0 < args.val_split < 1):
-            raise ValueError("val_split must be between 0 and 1 (exclusive)")
-        logger.info(f"Splitting dataset with validation split: {args.val_split}")
+    # --- Split Dataset if validation_split is provided --- #
+    if args.validation_split > 0.0:
+        split_seed = getattr(args, 'seed', 42) # Use main seed if available
+        split_generator = torch.Generator().manual_seed(split_seed)
+        full_dataset = dataset # Rename for clarity
+        logger.info(f"Splitting dataset with validation split: {args.validation_split}")
         # Use the datasets library's built-in splitting method
-        split_dataset = dataset.train_test_split(test_size=args.val_split, seed=args.seed)
+        split_dataset = full_dataset.train_test_split(test_size=args.validation_split, seed=split_seed, generator=split_generator)
         train_dataset = split_dataset["train"]
         val_dataset = split_dataset["test"]
         logger.info(f"  Training samples: {len(train_dataset)}")
