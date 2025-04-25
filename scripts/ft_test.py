@@ -59,7 +59,6 @@ def parse_args():
     parser.add_argument("--mixed_precision", type=str, default=None, choices=["no", "fp16", "bf16"], help="Whether to use mixed precision. Choose between fp16 and bf16 (bfloat16). Bf16 requires PyTorch >= 1.10. Set 'no' for standard 32-bit float training.")
     parser.add_argument("--local_rank", type=int, default=-1, help="For distributed training: local_rank")
     parser.add_argument("--enable_xformers_memory_efficient_attention", action="store_true", help="Whether or not to use xformers.")
-    parser.add_argument("--output_dir", type=str, default="flux-finetuned", help="The output directory where the model predictions and checkpoints will be written.")
 
     cmd_args = parser.parse_args() # Parse command line args first
 
