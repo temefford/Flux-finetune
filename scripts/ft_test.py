@@ -489,7 +489,6 @@ def main(args):
         processed_dataset = dataset.map(
             _transform_func,
             batched=True,
-            num_proc=0, # Removed preprocessing_num_workers
             remove_columns=columns_to_remove,
             desc="Running tokenizer on train dataset",
         )
@@ -509,12 +508,12 @@ def main(args):
              image_column=args.image_column,
              caption_column=None, # Not needed for imagefolder
              hash_column=None, # Not needed for imagefolder
-             tokenizer_2=tokenizer_2,
+             tokenizer_2=tokenizer_2, # Still needed to create dummy text inputs
+             text_id_map=None # No text IDs for imagefolder
         )
         processed_dataset = dataset.map(
              _transform_func,
              batched=True,
-             num_proc=0, # Removed preprocessing_num_workers
              remove_columns=columns_to_remove,
              desc="Running preprocessing on imagefolder dataset",
         )
