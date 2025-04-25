@@ -457,7 +457,6 @@ def main(args):
     logger.info("Preprocessing training data...")
     preprocess_kwargs = {
         "image_transforms": image_transforms,
-        "tokenizer": tokenizer,
         "tokenizer_2": tokenizer_2,
         "args": args, # Pass the args namespace
         "caption_column": args.caption_column # Pass caption_column
@@ -474,7 +473,6 @@ def main(args):
         logger.info("Preprocessing validation data...")
         preprocess_kwargs_val = {
             "image_transforms": image_transforms,
-            "tokenizer": tokenizer,
             "tokenizer_2": tokenizer_2,
             "args": args, # Pass the args namespace
             "caption_column": args.caption_column # Pass caption_column
