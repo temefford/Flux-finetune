@@ -896,7 +896,7 @@ def main(args):
                 # Generate correct 1D img_ids (positional indices) and expand to batch size
                 img_ids_1d = torch.arange(height * width, device=latents.device)
                 img_ids = img_ids_1d.repeat(bsz, 1)
-                txt_ids = make_txt_ids(img_ids)
+                txt_ids = img_ids[:1]
                 logger.debug(f"Generated 1D img_ids shape: {img_ids.shape}")
 
                 # Sample noise and timesteps
@@ -1044,7 +1044,7 @@ def main(args):
                     latents_reshaped_val = latents_val.permute(0, 2, 3, 1).reshape(bsz_val, h_val * w_val, c_val)
                     img_ids_1d_val = torch.arange(h_val * w_val, device=latents_val.device)
                     img_ids_val = img_ids_1d_val.repeat(bsz_val, 1)
-                    txt_ids_val = make_txt_ids(img_ids_val)
+                    txt_ids_val = img_ids_val[:1]
                     logger.debug(f"Generated validation 1D img_ids shape: {img_ids_val.shape}")
 
                     # Sample noise and timesteps for validation
