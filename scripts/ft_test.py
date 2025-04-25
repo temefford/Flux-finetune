@@ -23,7 +23,6 @@ from tqdm.auto import tqdm
 
 import numpy as np # Import numpy for type checking
 import logging
-import traceback
 
 logger = get_logger(__name__)
 
@@ -217,14 +216,14 @@ def preprocess_single_example(example, dataset_abs_path, image_transforms, image
         # --- Return Processed Example --- #
         result = {}
         if pixel_values_tensor is not None:
-            result["pixel_values"] = pixel_values_tensor
-            logger.debug(f"Preprocess check - pixel_values type: {type(result['pixel_values'])}, shape: {result['pixel_values'].shape if isinstance(result['pixel_values'], torch.Tensor) else 'N/A'}")
+            result["pixel_values"] = pixel_values_tensor.tolist() # Convert to list
+            logger.debug(f"Preprocess check - pixel_values type: {type(result['pixel_values'])}, is list: {isinstance(result['pixel_values'], list)}")
         else:
             logger.debug("Preprocess check - pixel_values is None")
 
         if input_ids_2_tensor is not None:
-            result["input_ids_2"] = input_ids_2_tensor
-            logger.debug(f"Preprocess check - input_ids_2 type: {type(result['input_ids_2'])}, shape: {result['input_ids_2'].shape if isinstance(result['input_ids_2'], torch.Tensor) else 'N/A'}")
+            result["input_ids_2"] = input_ids_2_tensor.tolist() # Convert to list
+            logger.debug(f"Preprocess check - input_ids_2 type: {type(result['input_ids_2'])}, is list: {isinstance(result['input_ids_2'], list)}")
         else:
             logger.debug("Preprocess check - input_ids_2 is None")
 
@@ -561,48 +560,89 @@ def main(args):
             # Return an empty dictionary or None to signal skipping this batch in the training loop
             return None # Return None to signal skipping
 
-        # Log details of valid examples before stacking
-        logger.debug(f"Collate - Processing {len(valid_examples)} valid examples out of {len(examples)} original.")
-        # for i, example in enumerate(valid_examples):
-        #     pv = example.get("pixel_values")
-        #     ids2 = example.get("input_ids_2")
-        #     pv_type = type(pv).__name__
-        #     ids2_type = type(ids2).__name__
-        #     # Use getattr to safely get shape, defaulting to 'N/A' if not a tensor
-        #     pv_shape = getattr(pv, 'shape', 'N/A')
-        #     ids2_shape = getattr(ids2, 'shape', 'N/A')
-        #     logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
+        # Initialize lists to hold batch TENSORS (converted from lists)
+        pixel_values_tensors = []
+        input_ids_tensors = [] # Optional
+        input_ids_2_tensors = []
 
+        # Gather data from valid examples, converting lists to tensors
+        for i, example in enumerate(valid_examples):
+            # Ensure the retrieved items are actually lists before conversion
+            pv_list = example.get("pixel_values")
+            if not isinstance(pv_list, list):
+                logger.error(f"Collate ERROR - Example {i}: pixel_values is type {type(pv_list)}, expected list! Skipping example.")
+                continue
+            iid2_list = example.get("input_ids_2")
+            if not isinstance(iid2_list, list):
+                logger.error(f"Collate ERROR - Example {i}: input_ids_2 is type {type(iid2_list)}, expected list! Skipping example.")
+                continue
+
+            try:
+                # Convert pixel_values list back to tensor
+                pv_tensor = torch.tensor(pv_list, dtype=torch.float32)
+                pixel_values_tensors.append(pv_tensor)
+
+                # Convert input_ids_2 list back to tensor
+                iid2_tensor = torch.tensor(iid2_list, dtype=torch.long)
+                input_ids_2_tensors.append(iid2_tensor)
+
+                # Handle optional input_ids (convert list to tensor if present)
+                iid1_list = example.get("input_ids")
+                if iid1_list is not None and isinstance(iid1_list, list):
+                    iid1_tensor = torch.tensor(iid1_list, dtype=torch.long)
+                    input_ids_tensors.append(iid1_tensor)
+                elif iid1_list is not None: # Log if it exists but isn't a list
+                    logger.warning(f"Collate WARN - Example {i}: input_ids found but is type {type(iid1_list)}, expected list. Skipping input_ids.")
+
+                logger.debug(f"Collate conversion - Example {i}: Converted pv tensor shape: {pv_tensor.shape}, iid2 tensor shape: {iid2_tensor.shape}")
+
+            except (TypeError, ValueError) as conv_err:
+                logger.error(f"Collate ERROR - Example {i}: Failed to convert list to tensor. Error: {conv_err}. Skipping example.")
+                # Clear lists and return None if any conversion fails to prevent partial batch
+                return None
+
+        # Check if lists of TENSORS are empty after filtering/conversion errors
+        if not pixel_values_tensors or not input_ids_2_tensors:
+            logger.warning("Collate - No valid tensors generated after conversion attempts.")
+            return None
+
+        # Stack the tensors
         try:
-            # Examples in valid_examples should now have Tensors directly
-            pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
+            # Stack the collected TENSORS
+            pixel_values = torch.stack(pixel_values_tensors)
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
 
-            input_ids_2 = torch.stack([example["input_ids_2"] for example in valid_examples])
+            input_ids_2 = torch.stack(input_ids_2_tensors)
 
+            # Stack optional input_ids only if the list is not empty
+            input_ids = torch.stack(input_ids_tensors) if input_ids_tensors else None
+
+            logger.debug(f"Collate - Batch successfully created with stacked tensors. PV shape: {pixel_values.shape}, IID2 shape: {input_ids_2.shape}")
             # Return the batch dictionary for the model
             batch = {
                 "pixel_values": pixel_values,
                 "input_ids_2": input_ids_2,
             }
+            if input_ids is not None:
+                batch["input_ids"] = input_ids
+
             return batch
         except TypeError as e:
-            logger.error(f"Error during collate_fn stacking: {e}")
-            # ENHANCED LOG: Log the types of the first few problematic items in the list before stacking
-            logger.error(f"  Collate Troubleshoot - Attempting to stack {len([example['pixel_values'] for example in valid_examples])} pixel_values items.")
-            for i, pv_item in enumerate([example['pixel_values'] for example in valid_examples][:5]): # Log first 5 pixel_values items
-                logger.error(f"    Item {i} in pixel_values_list type: {type(pv_item)}")
-            logger.error(f"  Collate Troubleshoot - Attempting to stack {len([example['input_ids_2'] for example in valid_examples])} input_ids_2 items.")
-            for i, iid2_item in enumerate([example['input_ids_2'] for example in valid_examples][:5]): # Log first 5 input_ids_2 items
-                 logger.error(f"    Item {i} in input_ids_2_list type: {type(iid2_item)}")
-
+            # This error should ideally not happen now, but keep logging just in case.
+            logger.error(f"Error during collate_fn STACKING (after conversion): {e}")
+            logger.error(f"  Collate Troubleshoot - Attempting to stack {len(pixel_values_tensors)} pixel_values tensors.")
+            for i, pv_item in enumerate(pixel_values_tensors[:5]):
+                logger.error(f"    Item {i} in pixel_values_tensors type: {type(pv_item)}, shape: {pv_item.shape}")
+            logger.error(f"  Collate Troubleshoot - Attempting to stack {len(input_ids_2_tensors)} input_ids_2 tensors.")
+            for i, iid2_item in enumerate(input_ids_2_tensors[:5]):
+                logger.error(f"    Item {i} in input_ids_2_tensors type: {type(iid2_item)}, shape: {iid2_item.shape}")
             return None # Return None if stacking fails
         except Exception as e:
-            logger.error(f"Unexpected error in collate_fn: {e}", exc_info=True)
+            logger.error(f"Unexpected error in collate_fn during stacking: {e}", exc_info=True)
             # Log tensor shapes for debugging if possible
             for i, ex in enumerate(valid_examples):
-                pv_shape = ex['pixel_values'].shape if isinstance(ex.get('pixel_values'), torch.Tensor) else 'Not Tensor or None'
-                id_shape = ex['input_ids_2'].shape if isinstance(ex.get('input_ids_2'), torch.Tensor) else 'Not Tensor or None'
+                pv_shape = ex['pixel_values'] if isinstance(ex.get('pixel_values'), list) else 'Not List or None'
+                id_shape = ex['input_ids_2'] if isinstance(ex.get('input_ids_2'), list) else 'Not List or None'
                 logger.error(f"  Example {i} shapes - pixel_values: {pv_shape}, input_ids_2: {id_shape}")
             return None # Skip batch if stacking fails
 
