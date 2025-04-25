@@ -1275,12 +1275,11 @@ def log_transformer_inputs(logger, hidden_states, timestep, encoder_hidden_state
     logger.debug(f"  img_ids shape: {img_ids.shape}")
 
 if __name__ == "__main__":
-    # Configuration loading and argument parsing are now handled within parse_args
+    # --- Argument Parsing --- #
     args = parse_args()
-    
-    # Defaults were already handled inside parse_args
-    # args.validation_batch_size = getattr(args, 'validation_batch_size', args.batch_size)
-    # args.dataloader_num_workers = getattr(args, 'dataloader_num_workers', 4)
-    # args.preprocessing_num_workers = getattr(args, 'preprocessing_num_workers', 1)
-
+    print("--- Parsed Arguments ---")
+    print(vars(args))
+    print("----------------------")
+ 
+    # --- Main Execution --- #
     main(args)
