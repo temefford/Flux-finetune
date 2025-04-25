@@ -621,7 +621,18 @@ def main(args):
             # Return an empty dictionary or None to signal skipping this batch in the training loop
             return None
 
-        # Stack only the valid tensors
+        # Log details of valid examples before stacking
+        logger.debug(f"Collate - Processing {len(valid_examples)} valid examples out of {len(examples)} original.")
+        for i, example in enumerate(valid_examples):
+            pv = example.get("pixel_values")
+            ids2 = example.get("input_ids_2")
+            pv_type = type(pv).__name__
+            ids2_type = type(ids2).__name__
+            # Use getattr to safely get shape, defaulting to 'N/A' if not a tensor
+            pv_shape = getattr(pv, 'shape', 'N/A')
+            ids2_shape = getattr(ids2, 'shape', 'N/A')
+            logger.debug(f"Collate - Valid Example {i}: pixel_values type={pv_type}, shape={pv_shape}; input_ids_2 type={ids2_type}, shape={ids2_shape}")
+
         try:
             pixel_values = torch.stack([example["pixel_values"] for example in valid_examples])
             pixel_values = pixel_values.to(memory_format=torch.contiguous_format).float()
