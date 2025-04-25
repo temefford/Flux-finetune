@@ -2,6 +2,7 @@ import argparse
 import math
 import os
 import time
+from functools import partial
 from pathlib import Path
 
 import datasets
@@ -18,7 +19,6 @@ from diffusers import FluxPipeline, DDPMScheduler
 from diffusers.optimization import get_scheduler
 from peft import LoraConfig, PeftModel
 from PIL import Image
-from torchvision import transforms
 from tqdm.auto import tqdm
 
 logger = get_logger(__name__)
@@ -391,7 +391,7 @@ def main(args):
     logger.info("Loading dataset...")
     if args.dataset_type == "hf_metadata":
         # Ensure dataset_path is the directory containing metadata.jsonl
-        data_files = {"train": os.path.join(args.dataset_path, "metadata.jsonl")}
+        data_files = {"train": os.path.join(args.dataset_path, "metadata.json")}
         dataset = load_dataset("json", data_files=data_files, split="train")
         # Filter dataset if filter_field and filter_value are provided
         if args.filter_field and args.filter_value:
